@@ -5,7 +5,6 @@ const FONT: FontData<'static> = FontData {
     index: "ABg\u{4f60}",
     size: 5,
     ascii_width: 4,
-    bpp: 1,
     bitmap: &BITMAP,
     glyphs: &GLYPHS,
 };
@@ -65,12 +64,11 @@ const BITMAP: [u8; 6] = [
     0b01010111, 0b11011010, 0b11010111, 0b01011100, 0b10000000, 0b10000000,
 ];
 
-const COVERAGE_FONT: FontData<'static> = FontData {
+const ONE_BPP_FONT: FontData<'static> = FontData {
     index: "x",
     size: 1,
     ascii_width: 4,
-    bpp: 2,
-    bitmap: &[0b00011011],
+    bitmap: &[0b10100000],
     glyphs: &[Glyph {
         bitmap_offset: 0,
         width: 4,
@@ -225,28 +223,13 @@ fn draws_proportional_horizontal_text_using_actual_widths() {
 }
 
 #[test]
-fn coverage_pixels_preserve_multi_bpp_samples() {
-    let mut pixels = Vec::new();
-    let text = DrawableText::new(
-        &COVERAGE_FONT,
-        "x",
-        TextStyle::new(BinaryColor::On).align(Alignment::TOP_LEFT),
-    );
+fn draw_path_keeps_1bpp_bitmap_semantics() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let text = DrawableText::new(&ONE_BPP_FONT, "x", monospace());
 
-    text.for_each_coverage_pixel(|point, coverage| {
-        pixels.push((point, coverage));
-        Ok::<(), ()>(())
-    })
-    .unwrap();
+    text.draw(&mut display).unwrap();
 
-    assert_eq!(
-        pixels,
-        [
-            (Point::new(1, 0), 85),
-            (Point::new(2, 0), 170),
-            (Point::new(3, 0), 255)
-        ]
-    );
+    display.assert_pattern(&["# # "]);
 }
 
 #[test]
@@ -267,7 +250,6 @@ fn proportional_glyph_uses_generated_y_offset() {
         index: "Ag",
         size: 5,
         ascii_width: 4,
-        bpp: 1,
         bitmap: &BITMAP,
         glyphs: &[
             GLYPHS[0],

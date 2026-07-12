@@ -21,30 +21,77 @@ pub(crate) struct BitmapGlyph {
 pub(crate) fn rasterize_block(
     font: &FreeTypeFont,
     size: u16,
-    bpp: u8,
     chars: impl IntoIterator<Item = char>,
 ) -> syn::Result<Vec<BitmapGlyph>> {
-    font.set_pixel_size(size)
-        .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
+    let chars = chars.into_iter().collect::<Vec<_>>();
+    let ascii_size = fitting_ascii_size(font, size, chars.iter().copied())?;
     let mut glyphs: Vec<_> = chars
         .into_iter()
-        .map(|codepoint| rasterize_glyph(font, codepoint, bpp, size))
+        .scan(None, |active_size, codepoint| {
+            let glyph_size = if codepoint.is_ascii() {
+                ascii_size
+            } else {
+                size
+            };
+            let result = set_active_pixel_size(font, active_size, glyph_size)
+                .and_then(|()| rasterize_glyph(font, codepoint, size));
+            Some(result)
+        })
         .collect::<Result<_, _>>()?;
     apply_auto_y_offsets(size, &mut glyphs);
     Ok(glyphs)
 }
 
-fn rasterize_glyph(
+fn fitting_ascii_size(
     font: &FreeTypeFont,
-    codepoint: char,
-    bpp: u8,
+    raster_height: u16,
+    chars: impl IntoIterator<Item = char>,
+) -> syn::Result<u16> {
+    let chars = chars
+        .into_iter()
+        .filter(|codepoint| codepoint.is_ascii())
+        .collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Ok(raster_height);
+    }
+
+    for glyph_size in (1..=raster_height).rev() {
+        let mut active_size = None;
+        set_active_pixel_size(font, &mut active_size, glyph_size)?;
+        let glyphs = chars
+            .iter()
+            .copied()
+            .map(|codepoint| rasterize_glyph(font, codepoint, raster_height))
+            .collect::<syn::Result<Vec<_>>>()?;
+
+        if glyphs_fit_vertically(raster_height, &glyphs) {
+            return Ok(glyph_size);
+        }
+    }
+
+    Ok(1)
+}
+
+fn set_active_pixel_size(
+    font: &FreeTypeFont,
+    active_size: &mut Option<u16>,
     size: u16,
-) -> syn::Result<BitmapGlyph> {
+) -> syn::Result<()> {
+    if *active_size == Some(size) {
+        return Ok(());
+    }
+
+    font.set_pixel_size(size)
+        .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
+    *active_size = Some(size);
+    Ok(())
+}
+
+fn rasterize_glyph(font: &FreeTypeFont, codepoint: char, size: u16) -> syn::Result<BitmapGlyph> {
     let face = font.face();
     let glyph_index = unsafe { ft::FT_Get_Char_Index(face, codepoint as ft::FT_ULong) };
-    let load_flags = glyph_load_flags(bpp);
     source::ft_ok(
-        unsafe { ft::FT_Load_Glyph(face, glyph_index, load_flags) },
+        unsafe { ft::FT_Load_Glyph(face, glyph_index, glyph_load_flags()) },
         "load glyph",
     )
     .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
@@ -150,6 +197,23 @@ fn glyph_bottom(raster_height: i32, glyph: &BitmapGlyph) -> i32 {
     glyph_top(raster_height, glyph) + glyph.height as i32
 }
 
+fn glyphs_fit_vertically(raster_height: u16, glyphs: &[BitmapGlyph]) -> bool {
+    let Some(first) = glyphs.first() else {
+        return true;
+    };
+
+    let raster_height = raster_height as i32;
+    let mut min_top = glyph_top(raster_height, first);
+    let mut max_bottom = glyph_bottom(raster_height, first);
+
+    for glyph in &glyphs[1..] {
+        min_top = min_top.min(glyph_top(raster_height, glyph));
+        max_bottom = max_bottom.max(glyph_bottom(raster_height, glyph));
+    }
+
+    max_bottom - min_top <= raster_height
+}
+
 fn bitmap_pixels(bitmap: &ft::FT_Bitmap, width: u16, height: u16) -> Vec<u8> {
     let width = width as usize;
     let height = height as usize;
@@ -246,18 +310,11 @@ fn ft_load_target_mono() -> i32 {
     2 << 16
 }
 
-fn ft_load_target_light() -> i32 {
-    1 << 16
-}
-
-fn glyph_load_flags(bpp: u8) -> i32 {
-    let mut flags = ft::FT_LOAD_RENDER as i32 | ft::FT_LOAD_FORCE_AUTOHINT as i32;
-    if bpp == 1 {
-        flags |= ft_load_target_mono() | ft::FT_LOAD_MONOCHROME as i32;
-    } else {
-        flags |= ft_load_target_light();
-    }
-    flags
+fn glyph_load_flags() -> i32 {
+    ft::FT_LOAD_RENDER as i32
+        | ft::FT_LOAD_FORCE_AUTOHINT as i32
+        | ft_load_target_mono()
+        | ft::FT_LOAD_MONOCHROME as i32
 }
 
 pub(crate) fn offset_i16(value: i16, delta: i16) -> i16 {
@@ -276,7 +333,7 @@ fn clamp_i32_to_i16(value: i32) -> i16 {
 mod tests {
     use super::{
         BitmapGlyph, advance_width_pixels_16dot16, apply_auto_y_offsets, apply_cell_offsets,
-        centered_offset, y_offset_delta,
+        centered_offset, glyphs_fit_vertically, y_offset_delta,
     };
 
     #[test]
@@ -364,6 +421,26 @@ mod tests {
         assert_eq!(glyphs[0].x_offset, 0);
         assert_eq!(glyphs[0].y_offset, 6);
         assert_eq!(glyphs[0].bitmap.len(), 24);
+    }
+
+    #[test]
+    fn vertical_fit_detects_top_and_bottom_overflow() {
+        assert!(!glyphs_fit_vertically(
+            6,
+            &[glyph_for_codepoint('A', 3, 8, 7)]
+        ));
+        assert!(!glyphs_fit_vertically(
+            6,
+            &[glyph_for_codepoint('A', 3, 8, 1)]
+        ));
+    }
+
+    #[test]
+    fn vertical_fit_ignores_horizontal_overflow() {
+        assert!(glyphs_fit_vertically(
+            6,
+            &[glyph_for_codepoint('A', 99, 4, 5)]
+        ));
     }
 
     fn glyph(height: u16, y_offset: i16) -> BitmapGlyph {

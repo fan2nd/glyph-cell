@@ -25,18 +25,20 @@ and contains:
 - an ordered character index
 - the rasterization height
 - the generated ASCII cell width
-- packed bitmap bytes at 1, 2, 3, 4, or 8 bits per pixel
+- packed 1bpp bitmap bytes
 - raw per-glyph bitmap bounds and advance width
 - generated per-glyph cell width and bitmap offset for cell-based drawing
 
 During generation, `font_data!` rasterizes with FreeType, separates ASCII and
 non-ASCII glyphs in each font block, and applies one shared vertical adjustment
 to each group so glyphs settle consistently inside the requested raster height.
-Individual glyphs can then be nudged with a block-local `y_offset` map. ASCII
-characters use `ascii_width` cells; every other character uses the rasterization
-`size` as its cell width. The generated glyph data stores the final bitmap
-offset inside that cell, so runtime drawing does not guess vertical placement
-again.
+ASCII glyphs may be rasterized at a smaller size automatically when their shared
+vertical span would otherwise exceed the requested height; this fit check only
+considers top/bottom overflow, not left/right width. Individual glyphs can then
+be nudged with a block-local `y_offset` map. ASCII characters use `ascii_width`
+cells; every other character uses the rasterization `size` as its cell width.
+The generated glyph data stores the final bitmap offset inside that cell, so
+runtime drawing does not guess vertical placement again.
 
 `DrawableText` is the runtime drawing object. It holds:
 
@@ -65,9 +67,7 @@ width for that character. Alignment moves the measured text area and shorter
 lines or columns within that area.
 
 `DrawableText::draw()` emits binary pixels for normal `embedded-graphics` draw
-targets. For anti-aliased output, generate with `bpp: 4` or `bpp: 8` and use
-`DrawableText::for_each_coverage_pixel` to blend the returned 0..255 coverage
-values into displays or frame buffers that support color blending.
+targets and reads the generated bitmap as 1bpp.
 
 ## Crates
 
@@ -85,11 +85,10 @@ cargo run -p glyph-cell-simulator
 
 The simulator runs the real `DrawableText` renderer against an in-memory draw
 target. It exposes text, layout mode, flow, 3x3 alignment, raster size, ASCII
-cell width, bpp, character spacing and line spacing, glyph y-offset tweaks,
-origin, canvas size, colors, zoom, and debug boxes. It can rasterize preview
-glyphs with FreeType from discovered system fonts or a user-provided font file,
-previews multi-bpp glyphs with coverage blending, and warns when glyphs are
-missing or clipped by the generated cell.
+cell width, character spacing and line spacing, glyph y-offset tweaks, origin,
+canvas size, colors, zoom, and debug boxes. It can rasterize preview glyphs with
+FreeType from discovered system fonts or a user-provided font file, and warns
+when glyphs are missing or vertically clipped by the generated cell.
 
 ## Checks
 

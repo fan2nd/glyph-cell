@@ -7,7 +7,6 @@ const FONT: FontData<'static> = FontData {
     index: "ABg",
     size: 5,
     ascii_width: 4,
-    bpp: 1,
     bitmap: &BITMAP,
     glyphs: &GLYPHS,
 };

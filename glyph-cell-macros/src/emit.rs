@@ -5,11 +5,10 @@ use crate::raster::BitmapGlyph;
 pub(crate) fn font_expression(
     size: u16,
     ascii_width: u16,
-    bpp: u8,
     mut glyphs: Vec<BitmapGlyph>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     glyphs.sort_by_key(|glyph| glyph.codepoint);
-    let source = source(size, ascii_width, bpp, &glyphs).map_err(|err| {
+    let source = source(size, ascii_width, &glyphs).map_err(|err| {
         syn::Error::new(
             proc_macro2::Span::call_site(),
             format!("failed to generate font data: {err}"),
@@ -26,7 +25,6 @@ pub(crate) fn font_expression(
 fn source(
     size: u16,
     ascii_width: u16,
-    bpp: u8,
     glyphs: &[BitmapGlyph],
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut bitmap = Vec::new();
@@ -34,7 +32,7 @@ fn source(
         .iter()
         .map(|glyph| {
             let offset = bitmap.len() as u32;
-            pack_pixels(&glyph.bitmap, bpp, &mut bitmap);
+            pack_pixels(&glyph.bitmap, &mut bitmap);
             (glyph, offset)
         })
         .collect::<Vec<_>>();
@@ -42,7 +40,7 @@ fn source(
     let mut out = String::new();
     write_glyphs(&mut out, &metrics)?;
     write_bitmap(&mut out, &bitmap)?;
-    write_font(&mut out, size, ascii_width, bpp, glyphs)?;
+    write_font(&mut out, size, ascii_width, glyphs)?;
     Ok(out)
 }
 
@@ -80,7 +78,6 @@ fn write_font(
     out: &mut String,
     size: u16,
     ascii_width: u16,
-    bpp: u8,
     glyphs: &[BitmapGlyph],
 ) -> std::fmt::Result {
     let index: String = glyphs.iter().map(|glyph| glyph.codepoint).collect();
@@ -88,30 +85,25 @@ fn write_font(
     writeln!(out, "    index: {:?},", index)?;
     writeln!(out, "    size: {},", size)?;
     writeln!(out, "    ascii_width: {},", ascii_width)?;
-    writeln!(out, "    bpp: {},", bpp)?;
     writeln!(out, "    bitmap: &BITMAP,")?;
     writeln!(out, "    glyphs: &GLYPHS,")?;
     writeln!(out, "}}")
 }
 
-fn pack_pixels(pixels: &[u8], bpp: u8, out: &mut Vec<u8>) {
+fn pack_pixels(pixels: &[u8], out: &mut Vec<u8>) {
     let mut byte = 0u8;
-    let mut used_bits = 0u8;
 
-    for pixel in pixels {
-        let sample = pixel >> (8 - bpp);
-        for bit_offset in (0..bpp).rev() {
-            byte |= ((sample >> bit_offset) & 1) << (7 - used_bits);
-            used_bits += 1;
-            if used_bits == 8 {
-                out.push(byte);
-                byte = 0;
-                used_bits = 0;
-            }
+    for (index, pixel) in pixels.iter().enumerate() {
+        if *pixel != 0 {
+            byte |= 1 << (7 - index % 8);
+        }
+        if index % 8 == 7 {
+            out.push(byte);
+            byte = 0;
         }
     }
 
-    if used_bits != 0 {
+    if !pixels.len().is_multiple_of(8) {
         out.push(byte);
     }
 }

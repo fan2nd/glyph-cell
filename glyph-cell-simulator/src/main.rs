@@ -9,7 +9,7 @@ use std::{
 
 use eframe::egui;
 use embedded_graphics_core::{
-    Pixel,
+    Drawable, Pixel,
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Point, Size},
     pixelcolor::{Rgb888, RgbColor},
@@ -46,7 +46,6 @@ struct SimulatorApp {
     font_size: u16,
     font_cache: FontCache,
     ascii_width: u32,
-    bpp: u8,
     spacing: i32,
     line_spacing: i32,
     glyph_y_offsets: String,
@@ -78,7 +77,6 @@ impl SimulatorApp {
             font_cache: FontCache::default(),
             system_fonts,
             ascii_width: 10,
-            bpp: 4,
             spacing: 1,
             line_spacing: 0,
             glyph_y_offsets: String::new(),
@@ -225,13 +223,6 @@ impl SimulatorApp {
         stepped_slider_u32(ui, "Collection index", &mut self.collection_index, 0..=8, 1);
         stepped_slider_u16(ui, "Raster size", &mut self.font_size, 4..=96, 1);
         stepped_slider_u32(ui, "ASCII cell width", &mut self.ascii_width, 1..=128, 1);
-        egui::ComboBox::from_label("Bpp")
-            .selected_text(self.bpp.to_string())
-            .show_ui(ui, |ui| {
-                for bpp in [1, 2, 4, 8] {
-                    ui.selectable_value(&mut self.bpp, bpp, bpp.to_string());
-                }
-            });
         ui.label("Glyph y_offset tweaks");
         ui.add(
             egui::TextEdit::multiline(&mut self.glyph_y_offsets)
@@ -266,7 +257,10 @@ impl SimulatorApp {
         if !self.font_cache.clipped_chars.is_empty() {
             ui.colored_label(
                 egui::Color32::YELLOW,
-                format!("Clipped glyphs: {}", self.font_cache.clipped_chars),
+                format!(
+                    "Vertically clipped glyphs: {}",
+                    self.font_cache.clipped_chars
+                ),
             );
         }
     }
@@ -377,10 +371,7 @@ impl SimulatorApp {
         let mut frame = FrameBuffer::new(self.canvas_width, self.canvas_height);
         let font_data = self.font_cache.data.as_font_data();
         let text = self.drawable_text(&font_data, self.glyph_color);
-        let _ = text.for_each_coverage_pixel(|point, coverage| {
-            frame.blend_pixel(point, self.glyph_color, coverage);
-            Ok::<(), Infallible>(())
-        });
+        let _ = text.draw(&mut frame);
 
         if self.debug_overlays.has_any() {
             for kind in self.debug_overlays.kinds() {
@@ -438,7 +429,6 @@ impl SimulatorApp {
             collection_index: self.collection_index,
             size: self.font_size,
             ascii_width: self.ascii_width,
-            bpp: self.bpp,
             index,
             y_offsets: self.glyph_y_offsets.clone(),
         };
@@ -452,7 +442,6 @@ impl SimulatorApp {
             self.collection_index,
             self.font_size,
             self.ascii_width as u16,
-            self.bpp,
             &key.index,
             &self.glyph_y_offsets,
         ) {
@@ -522,10 +511,9 @@ impl SimulatorApp {
         let y_offsets = self.example_y_offsets();
 
         format!(
-            "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    bpp: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
+            "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
             self.font_size,
             self.ascii_width,
-            self.bpp,
             path,
             index,
             y_offsets,
@@ -921,7 +909,6 @@ struct FontBuildKey {
     collection_index: u32,
     size: u16,
     ascii_width: u32,
-    bpp: u8,
     index: String,
     y_offsets: String,
 }
@@ -956,7 +943,6 @@ struct OwnedFontData {
     index: String,
     size: u16,
     ascii_width: u16,
-    bpp: u8,
     bitmap: Vec<u8>,
     glyphs: Vec<Glyph>,
 }
@@ -967,7 +953,6 @@ impl OwnedFontData {
             index: &self.index,
             size: self.size,
             ascii_width: self.ascii_width,
-            bpp: self.bpp,
             bitmap: &self.bitmap,
             glyphs: &self.glyphs,
         }
@@ -978,7 +963,6 @@ impl OwnedFontData {
             index: "A".to_owned(),
             size: 7,
             ascii_width: 5,
-            bpp: 1,
             bitmap: vec![0b01110100, 0b01100011, 0b11111000, 0b11000110, 0b00100000],
             glyphs: vec![Glyph {
                 bitmap_offset: 0,
@@ -1018,23 +1002,6 @@ impl FrameBuffer {
 
     fn pixel(&self, x: u32, y: u32) -> Option<egui::Color32> {
         self.pixels[(y * self.width + x) as usize]
-    }
-
-    fn blend_pixel(&mut self, point: Point, color: egui::Color32, coverage: u8) {
-        let Some(index) = self.pixel_index(point) else {
-            return;
-        };
-        if coverage == 0 {
-            return;
-        }
-
-        let alpha = ((coverage as u16 * color.a() as u16 + 127) / 255) as u8;
-        self.pixels[index] = Some(egui::Color32::from_rgba_unmultiplied(
-            color.r(),
-            color.g(),
-            color.b(),
-            alpha,
-        ));
     }
 
     fn set_pixel(&mut self, point: Point, color: egui::Color32) {
@@ -1086,38 +1053,29 @@ fn build_font_data(
     collection_index: u32,
     size: u16,
     ascii_width: u16,
-    bpp: u8,
     index: &str,
     y_offset_tweaks: &str,
 ) -> Result<FontBuild, String> {
     let bytes = fs::read(path).map_err(|err| format!("Failed to read font file: {err}"))?;
     let font = PreviewFreeTypeFont::new(bytes, collection_index as isize)?;
-    font.set_pixel_size(size)?;
+    let ascii_size = fitting_ascii_size(&font, size, index.chars())?;
 
     let mut glyphs = Vec::new();
     let mut bitmaps = Vec::new();
     let mut missing_chars = String::new();
     let mut clipped_chars = String::new();
+    let mut active_size = None;
 
     for ch in index.chars() {
         if !font.has_glyph(ch) {
             missing_chars.push(ch);
         }
 
-        let rasterized = font.rasterize_glyph(ch, bpp)?;
+        let glyph_size = if ch.is_ascii() { ascii_size } else { size };
+        set_active_preview_pixel_size(&font, &mut active_size, glyph_size)?;
+        let rasterized = font.rasterize_glyph(ch)?;
+        glyphs.push(glyph_from_rasterized(&rasterized));
         bitmaps.push(rasterized.bitmap);
-
-        glyphs.push(Glyph {
-            bitmap_offset: 0,
-            width: rasterized.width,
-            height: rasterized.height,
-            cell_width: 0,
-            x_offset: 0,
-            y_offset: rasterized.y_offset,
-            x_min: rasterized.x_min,
-            y_min: rasterized.y_min,
-            advance_width: rasterized.advance_width,
-        });
     }
     apply_auto_y_offsets(size, index, &mut glyphs);
     apply_y_offset_tweaks(&mut glyphs, index, y_offset_tweaks)?;
@@ -1129,7 +1087,7 @@ fn build_font_data(
             clipped_chars.push(ch);
         }
         glyph.bitmap_offset = bitmap.len() as u32;
-        pack_pixels(pixels, bpp, &mut bitmap);
+        pack_pixels(pixels, &mut bitmap);
     }
 
     Ok(FontBuild {
@@ -1137,13 +1095,71 @@ fn build_font_data(
             index: index.to_owned(),
             size,
             ascii_width,
-            bpp,
             bitmap,
             glyphs,
         },
         missing_chars,
         clipped_chars,
     })
+}
+
+fn fitting_ascii_size(
+    font: &PreviewFreeTypeFont,
+    raster_height: u16,
+    chars: impl IntoIterator<Item = char>,
+) -> Result<u16, String> {
+    let chars = chars
+        .into_iter()
+        .filter(|codepoint| codepoint.is_ascii())
+        .collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Ok(raster_height);
+    }
+
+    for glyph_size in (1..=raster_height).rev() {
+        let mut active_size = None;
+        set_active_preview_pixel_size(font, &mut active_size, glyph_size)?;
+        let glyphs = chars
+            .iter()
+            .copied()
+            .map(|codepoint| font.rasterize_glyph(codepoint))
+            .map(|result| result.map(|rasterized| glyph_from_rasterized(&rasterized)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if glyphs_fit_vertically(raster_height, &glyphs) {
+            return Ok(glyph_size);
+        }
+    }
+
+    Ok(1)
+}
+
+fn set_active_preview_pixel_size(
+    font: &PreviewFreeTypeFont,
+    active_size: &mut Option<u16>,
+    size: u16,
+) -> Result<(), String> {
+    if *active_size == Some(size) {
+        return Ok(());
+    }
+
+    font.set_pixel_size(size)?;
+    *active_size = Some(size);
+    Ok(())
+}
+
+fn glyph_from_rasterized(rasterized: &RasterizedGlyph) -> Glyph {
+    Glyph {
+        bitmap_offset: 0,
+        width: rasterized.width,
+        height: rasterized.height,
+        cell_width: 0,
+        x_offset: 0,
+        y_offset: rasterized.y_offset,
+        x_min: rasterized.x_min,
+        y_min: rasterized.y_min,
+        advance_width: rasterized.advance_width,
+    }
 }
 
 struct PreviewFreeTypeFont {
@@ -1203,11 +1219,10 @@ impl PreviewFreeTypeFont {
         unsafe { ft::FT_Get_Char_Index(self.face, ch as ft::FT_ULong) != 0 }
     }
 
-    fn rasterize_glyph(&self, ch: char, bpp: u8) -> Result<RasterizedGlyph, String> {
+    fn rasterize_glyph(&self, ch: char) -> Result<RasterizedGlyph, String> {
         let glyph_index = unsafe { ft::FT_Get_Char_Index(self.face, ch as ft::FT_ULong) };
-        let load_flags = glyph_load_flags(bpp);
         ft_ok(
-            unsafe { ft::FT_Load_Glyph(self.face, glyph_index, load_flags) },
+            unsafe { ft::FT_Load_Glyph(self.face, glyph_index, glyph_load_flags()) },
             "load glyph",
         )?;
         let slot = unsafe { (*self.face).glyph };
@@ -1311,18 +1326,11 @@ fn ft_load_target_mono() -> i32 {
     2 << 16
 }
 
-fn ft_load_target_light() -> i32 {
-    1 << 16
-}
-
-fn glyph_load_flags(bpp: u8) -> i32 {
-    let mut flags = ft::FT_LOAD_RENDER as i32 | ft::FT_LOAD_FORCE_AUTOHINT as i32;
-    if bpp == 1 {
-        flags |= ft_load_target_mono() | ft::FT_LOAD_MONOCHROME as i32;
-    } else {
-        flags |= ft_load_target_light();
-    }
-    flags
+fn glyph_load_flags() -> i32 {
+    ft::FT_LOAD_RENDER as i32
+        | ft::FT_LOAD_FORCE_AUTOHINT as i32
+        | ft_load_target_mono()
+        | ft::FT_LOAD_MONOCHROME as i32
 }
 
 fn apply_cell_offsets(raster_height: u16, ascii_width: u16, index: &str, glyphs: &mut [Glyph]) {
@@ -1355,6 +1363,7 @@ fn fit_glyph_to_cell(raster_height: u16, glyph: &mut Glyph, pixels: &mut Vec<u8>
     let source_y = (visible_top - top).max(0) as usize;
     let old_width = glyph.width as usize;
     let old_height = glyph.height as usize;
+    let vertically_clipped = source_y != 0 || new_height as usize != old_height;
 
     if source_x == 0
         && source_y == 0
@@ -1379,7 +1388,7 @@ fn fit_glyph_to_cell(raster_height: u16, glyph: &mut Glyph, pixels: &mut Vec<u8>
     glyph.x_min = offset_i16_i32(glyph.x_min, source_x as i32);
     glyph.y_min = offset_i16_i32(glyph.y_min, cropped_bottom);
     *pixels = clipped;
-    true
+    vertically_clipped
 }
 
 fn centered_offset(outer: u16, inner: u16) -> i16 {
@@ -1440,6 +1449,23 @@ fn glyph_top(raster_height: i32, glyph: &Glyph) -> i32 {
 
 fn glyph_bottom(raster_height: i32, glyph: &Glyph) -> i32 {
     glyph_top(raster_height, glyph) + glyph.height as i32
+}
+
+fn glyphs_fit_vertically(raster_height: u16, glyphs: &[Glyph]) -> bool {
+    let Some(first) = glyphs.first() else {
+        return true;
+    };
+
+    let raster_height = raster_height as i32;
+    let mut min_top = glyph_top(raster_height, first);
+    let mut max_bottom = glyph_bottom(raster_height, first);
+
+    for glyph in &glyphs[1..] {
+        min_top = min_top.min(glyph_top(raster_height, glyph));
+        max_bottom = max_bottom.max(glyph_bottom(raster_height, glyph));
+    }
+
+    max_bottom - min_top <= raster_height
 }
 
 fn apply_y_offset_tweaks(
@@ -1514,24 +1540,20 @@ fn parse_y_offset_char(input: &str, line: usize) -> Result<char, String> {
     Ok(codepoint)
 }
 
-fn pack_pixels(pixels: &[u8], bpp: u8, out: &mut Vec<u8>) {
+fn pack_pixels(pixels: &[u8], out: &mut Vec<u8>) {
     let mut byte = 0u8;
-    let mut used_bits = 0u8;
 
-    for pixel in pixels {
-        let sample = pixel >> (8 - bpp);
-        for bit_offset in (0..bpp).rev() {
-            byte |= ((sample >> bit_offset) & 1) << (7 - used_bits);
-            used_bits += 1;
-            if used_bits == 8 {
-                out.push(byte);
-                byte = 0;
-                used_bits = 0;
-            }
+    for (index, pixel) in pixels.iter().enumerate() {
+        if *pixel != 0 {
+            byte |= 1 << (7 - index % 8);
+        }
+        if index % 8 == 7 {
+            out.push(byte);
+            byte = 0;
         }
     }
 
-    if used_bits != 0 {
+    if !pixels.len().is_multiple_of(8) {
         out.push(byte);
     }
 }

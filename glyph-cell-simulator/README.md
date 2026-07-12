@@ -21,10 +21,9 @@ use the raster height as their cell width. Proportional layout uses each glyph's
 actual bitmap width while keeping the raster height for its display cell. Both
 layout modes expose character spacing and line spacing controls.
 
-The bpp control matches the macro's bitmap depth. Multi-bpp previews use
-coverage blending instead of binary dithering, so 4bpp and 8bpp output show the
-anti-aliased shape FreeType produced. The simulator also warns when glyphs are
-missing from the selected font or clipped by the generated cell.
+The simulator renders the same generated 1bpp bitmap path as the runtime. It
+also warns when glyphs are missing from the selected font or vertically clipped
+by the generated cell.
 
 The `Glyph y_offset tweaks` field accepts one tweak per line, for example
 `g: -1` or `A: 1`. These preview tweaks use the same pixel-delta semantics as

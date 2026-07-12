@@ -16,7 +16,6 @@ const FONT: FontData<'static> = font_data! {
     size: 24,
     // `height: 24` is also accepted.
     ascii_width: 12,
-    bpp: 4,
     path: "assets/ascii.ttf",
     index: "Hello Rust!",
     y_offset: {
@@ -36,12 +35,13 @@ bitmap offset for runtime layout.
 
 For each font block, the macro applies one shared vertical adjustment for ASCII
 glyphs and another shared vertical adjustment for non-ASCII glyphs so both
-groups fit the requested raster height as consistently as possible. Add an
-optional `y_offset` map after a block's `index` to nudge individual glyphs after
-that shared adjustment. Values are pixel deltas and characters must appear in
-that block's `index`.
+groups fit the requested raster height as consistently as possible. ASCII glyphs
+are rasterized at the largest size that fits the requested height vertically;
+this automatic shrink check only considers top/bottom overflow, not left/right
+width. Add an optional `y_offset` map after a block's `index` to nudge
+individual glyphs after that shared adjustment. Values are pixel deltas and
+characters must appear in that block's `index`.
 
 `ascii_width` is optional and defaults to `size`. ASCII characters get that cell
-width; every other character gets `size` as its cell width. `bpp` is optional
-and supports 1, 2, 3, 4, or 8 bits per pixel; use 4 or 8 when the final renderer
-can blend coverage.
+width; every other character gets `size` as its cell width. Generated bitmaps
+are packed as 1bpp.
