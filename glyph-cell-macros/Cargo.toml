@@ -10,7 +10,7 @@ readme = "README.md"
 proc-macro = true
 
 [dependencies]
-fontdue = "0.9"
+freetype = "0.8"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "parsing"] }

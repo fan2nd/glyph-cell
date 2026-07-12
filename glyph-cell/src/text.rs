@@ -64,6 +64,13 @@ impl<'a, C: PixelColor> DrawableText<'a, C> {
             self.flow,
         )
     }
+
+    pub fn for_each_coverage_pixel<E>(
+        &self,
+        mut visit: impl FnMut(Point, u8) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for_each_text_coverage(self.font_data, self.run(), &mut visit)
+    }
 }
 
 impl<'a, C> Drawable for DrawableText<'a, C>
@@ -97,6 +104,36 @@ where
         }
         Ok(())
     })
+}
+
+fn for_each_text_coverage<E>(
+    font: &FontData<'_>,
+    run: TextRun<'_>,
+    visit: &mut impl FnMut(Point, u8) -> Result<(), E>,
+) -> Result<(), E> {
+    run.for_each_positioned_glyph(|positioned| {
+        if let (Some(glyph), Some(origin)) = (positioned.glyph, positioned.glyph_origin) {
+            for_each_glyph_coverage(font, &glyph, origin, visit)?;
+        }
+        Ok(())
+    })
+}
+
+fn for_each_glyph_coverage<E>(
+    font: &FontData<'_>,
+    glyph: &Glyph,
+    origin: Point,
+    visit: &mut impl FnMut(Point, u8) -> Result<(), E>,
+) -> Result<(), E> {
+    for y in 0..glyph.height {
+        for x in 0..glyph.width {
+            let coverage = font.glyph_coverage(glyph, x, y);
+            if coverage != 0 {
+                visit(origin + Point::new(x as i32, y as i32), coverage)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn draw_glyph<D, C>(

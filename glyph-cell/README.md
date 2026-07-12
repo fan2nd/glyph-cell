@@ -8,7 +8,7 @@
 
 - `font_data!`: rasterize one or more font files into `FontData`.
 - `FontData`: static glyph index, bitmap bytes, raster height, ASCII cell width,
-  raw glyph metrics, and generated cell placement data.
+  bpp, raw glyph metrics, and generated cell placement data.
 - `Glyph`: one bitmap glyph's bounds, advance, generated cell placement, and
   bitmap offset.
 - `TextStyle`: color, layout mode, character spacing/line spacing, and 3x3
@@ -26,6 +26,7 @@ use glyph_cell::{font_data, Alignment, DrawableText, FontData, TextStyle};
 const FONT: FontData<'static> = font_data! {
     size: 24,
     ascii_width: 12,
+    bpp: 4,
     path: "assets/ascii.ttf",
     index: "Hello Rust!",
 };
@@ -51,6 +52,10 @@ DrawableText::new(&FONT, "Hello", proportional)
     .at(Point::new(8, 56))
     .draw(&mut display)?;
 ```
+
+`draw()` writes binary pixels. If the target can blend colors, use
+`for_each_coverage_pixel` with `bpp: 4` or `bpp: 8` to keep FreeType's
+anti-aliased coverage instead of dithering it down to on/off pixels.
 
 With `features = ["debug"]`:
 

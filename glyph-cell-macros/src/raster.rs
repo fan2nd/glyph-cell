@@ -1,4 +1,8 @@
-use fontdue::Font;
+use std::slice;
+
+use freetype::freetype as ft;
+
+use crate::source::{self, FreeTypeFont};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BitmapGlyph {
@@ -11,44 +15,62 @@ pub(crate) struct BitmapGlyph {
     pub x_min: i16,
     pub y_min: i16,
     pub advance_width: u16,
-    pub bitmap: Vec<bool>,
+    pub bitmap: Vec<u8>,
 }
 
 pub(crate) fn rasterize_block(
-    font: &Font,
+    font: &FreeTypeFont,
     size: u16,
+    bpp: u8,
     chars: impl IntoIterator<Item = char>,
-) -> Vec<BitmapGlyph> {
+) -> syn::Result<Vec<BitmapGlyph>> {
+    font.set_pixel_size(size)
+        .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
     let mut glyphs: Vec<_> = chars
         .into_iter()
-        .map(|codepoint| rasterize_glyph(font, codepoint, size))
-        .collect();
+        .map(|codepoint| rasterize_glyph(font, codepoint, bpp, size))
+        .collect::<Result<_, _>>()?;
     apply_auto_y_offsets(size, &mut glyphs);
-    glyphs
+    Ok(glyphs)
 }
 
-fn rasterize_glyph(font: &Font, codepoint: char, size: u16) -> BitmapGlyph {
-    let (metrics, bitmap) = font.rasterize(codepoint, size as f32);
-    let width = metrics.width.max(1) as u16;
-    let height = metrics.height.max(1) as u16;
-    let pixels = if metrics.width == 0 || metrics.height == 0 {
-        vec![false; width as usize * height as usize]
-    } else {
-        bitmap.into_iter().map(|alpha| alpha >= 96).collect()
-    };
+fn rasterize_glyph(
+    font: &FreeTypeFont,
+    codepoint: char,
+    bpp: u8,
+    size: u16,
+) -> syn::Result<BitmapGlyph> {
+    let face = font.face();
+    let glyph_index = unsafe { ft::FT_Get_Char_Index(face, codepoint as ft::FT_ULong) };
+    let load_flags = glyph_load_flags(bpp);
+    source::ft_ok(
+        unsafe { ft::FT_Load_Glyph(face, glyph_index, load_flags) },
+        "load glyph",
+    )
+    .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(), err))?;
+    let slot = unsafe { (*face).glyph };
+    let slot = unsafe { &*slot };
+    let bitmap = &slot.bitmap;
+    let raw_width = bitmap.width as usize;
+    let raw_height = bitmap.rows as usize;
+    let width = raw_width.max(1).min(u16::MAX as usize) as u16;
+    let height = raw_height.max(1).min(u16::MAX as usize) as u16;
+    let pixels = bitmap_pixels(bitmap, width, height);
+    let y_offset = clamp_i32_to_i16(slot.bitmap_top);
+    let y_min = clamp_i32_to_i16(slot.bitmap_top - raw_height as i32);
 
-    BitmapGlyph {
+    Ok(BitmapGlyph {
         codepoint,
         width,
         height,
         cell_width: size,
         x_offset: 0,
-        y_offset: glyph_y_offset(metrics.height, metrics.ymin),
-        x_min: clamp_i32_to_i16(metrics.xmin),
-        y_min: clamp_i32_to_i16(metrics.ymin),
-        advance_width: advance_width_pixels(metrics.advance_width),
+        y_offset,
+        x_min: clamp_i32_to_i16(slot.bitmap_left),
+        y_min,
+        advance_width: advance_width_pixels_16dot16(slot.linearHoriAdvance),
         bitmap: pixels,
-    }
+    })
 }
 
 pub(crate) fn apply_cell_offsets(raster_height: u16, ascii_width: u16, glyphs: &mut [BitmapGlyph]) {
@@ -59,11 +81,8 @@ pub(crate) fn apply_cell_offsets(raster_height: u16, ascii_width: u16, glyphs: &
             raster_height
         };
         glyph.x_offset = centered_offset(glyph.cell_width, glyph.width);
+        fit_glyph_to_cell(raster_height, glyph);
     }
-}
-
-fn glyph_y_offset(height: usize, y_min: i32) -> i16 {
-    clamp_i32_to_i16(height as i32 + y_min)
 }
 
 fn centered_offset(outer: u16, inner: u16) -> i16 {
@@ -131,14 +150,114 @@ fn glyph_bottom(raster_height: i32, glyph: &BitmapGlyph) -> i32 {
     glyph_top(raster_height, glyph) + glyph.height as i32
 }
 
-fn advance_width_pixels(advance_width: f32) -> u16 {
-    if !advance_width.is_finite() || advance_width <= 0.0 {
-        0
-    } else if advance_width >= u16::MAX as f32 {
-        u16::MAX
-    } else {
-        advance_width.ceil() as u16
+fn bitmap_pixels(bitmap: &ft::FT_Bitmap, width: u16, height: u16) -> Vec<u8> {
+    let width = width as usize;
+    let height = height as usize;
+    if bitmap.buffer.is_null() || bitmap.width == 0 || bitmap.rows == 0 {
+        return vec![0; width * height];
     }
+
+    let pitch = bitmap.pitch;
+    let row_bytes = pitch.unsigned_abs() as usize;
+    let buffer = unsafe { slice::from_raw_parts(bitmap.buffer, row_bytes * bitmap.rows as usize) };
+    let mut pixels = vec![0; width * height];
+
+    for y in 0..height.min(bitmap.rows as usize) {
+        let source_y = if pitch >= 0 {
+            y
+        } else {
+            bitmap.rows as usize - 1 - y
+        };
+        let row = source_y * row_bytes;
+        for x in 0..width.min(bitmap.width as usize) {
+            pixels[y * width + x] = match bitmap.pixel_mode as u32 {
+                value if value == ft::FT_Pixel_Mode::FT_PIXEL_MODE_MONO as u32 => {
+                    let byte = buffer[row + x / 8];
+                    if byte & (0x80 >> (x % 8)) != 0 {
+                        255
+                    } else {
+                        0
+                    }
+                }
+                value if value == ft::FT_Pixel_Mode::FT_PIXEL_MODE_GRAY as u32 => buffer[row + x],
+                _ => 0,
+            };
+        }
+    }
+
+    pixels
+}
+
+fn fit_glyph_to_cell(raster_height: u16, glyph: &mut BitmapGlyph) {
+    let cell_width = glyph.cell_width as i32;
+    let cell_height = raster_height as i32;
+    let left = glyph.x_offset as i32;
+    let top = cell_height - glyph.y_offset as i32;
+    let right = left + glyph.width as i32;
+    let bottom = top + glyph.height as i32;
+
+    let visible_left = left.clamp(0, cell_width);
+    let visible_top = top.clamp(0, cell_height);
+    let visible_right = right.clamp(visible_left, cell_width);
+    let visible_bottom = bottom.clamp(visible_top, cell_height);
+
+    let new_width = (visible_right - visible_left) as u16;
+    let new_height = (visible_bottom - visible_top) as u16;
+    let source_x = (visible_left - left).max(0) as usize;
+    let source_y = (visible_top - top).max(0) as usize;
+    let old_width = glyph.width as usize;
+    let old_height = glyph.height as usize;
+
+    if source_x == 0
+        && source_y == 0
+        && new_width as usize == old_width
+        && new_height as usize == old_height
+    {
+        return;
+    }
+
+    let mut clipped = vec![0; new_width as usize * new_height as usize];
+    for y in 0..new_height as usize {
+        for x in 0..new_width as usize {
+            clipped[y * new_width as usize + x] =
+                glyph.bitmap[(source_y + y) * old_width + source_x + x];
+        }
+    }
+
+    let cropped_bottom = (bottom - visible_bottom).max(0);
+    glyph.width = new_width;
+    glyph.height = new_height;
+    glyph.x_offset = clamp_i32_to_i16(visible_left);
+    glyph.y_offset = clamp_i32_to_i16(cell_height - visible_top);
+    glyph.x_min = offset_i16_i32(glyph.x_min, source_x as i32);
+    glyph.y_min = offset_i16_i32(glyph.y_min, cropped_bottom);
+    glyph.bitmap = clipped;
+}
+
+fn advance_width_pixels_16dot16(advance_width: ft::FT_Fixed) -> u16 {
+    if advance_width <= 0 {
+        0
+    } else {
+        ((advance_width as i64 + 65535) / 65536).min(u16::MAX as i64) as u16
+    }
+}
+
+fn ft_load_target_mono() -> i32 {
+    2 << 16
+}
+
+fn ft_load_target_light() -> i32 {
+    1 << 16
+}
+
+fn glyph_load_flags(bpp: u8) -> i32 {
+    let mut flags = ft::FT_LOAD_RENDER as i32 | ft::FT_LOAD_FORCE_AUTOHINT as i32;
+    if bpp == 1 {
+        flags |= ft_load_target_mono() | ft::FT_LOAD_MONOCHROME as i32;
+    } else {
+        flags |= ft_load_target_light();
+    }
+    flags
 }
 
 pub(crate) fn offset_i16(value: i16, delta: i16) -> i16 {
@@ -156,15 +275,15 @@ fn clamp_i32_to_i16(value: i32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BitmapGlyph, advance_width_pixels, apply_auto_y_offsets, apply_cell_offsets,
+        BitmapGlyph, advance_width_pixels_16dot16, apply_auto_y_offsets, apply_cell_offsets,
         centered_offset, y_offset_delta,
     };
 
     #[test]
-    fn rounds_fractional_advance_up_to_pixels() {
-        assert_eq!(advance_width_pixels(0.0), 0);
-        assert_eq!(advance_width_pixels(4.0), 4);
-        assert_eq!(advance_width_pixels(4.1), 5);
+    fn rounds_16dot16_advance_up_to_pixels() {
+        assert_eq!(advance_width_pixels_16dot16(0), 0);
+        assert_eq!(advance_width_pixels_16dot16(4 * 65536), 4);
+        assert_eq!(advance_width_pixels_16dot16(4 * 65536 + 1), 5);
     }
 
     #[test]
@@ -230,6 +349,23 @@ mod tests {
         assert_eq!(glyphs[1].y_offset, 5);
     }
 
+    #[test]
+    fn clips_glyph_bitmap_to_generated_cell() {
+        let mut glyphs = [glyph_for_codepoint('A', 8, 8, 7)];
+        glyphs[0].x_offset = -2;
+        glyphs[0].bitmap = (0..64)
+            .map(|index| if index % 2 == 0 { 255 } else { 0 })
+            .collect();
+
+        apply_cell_offsets(6, 4, &mut glyphs);
+
+        assert_eq!(glyphs[0].width, 4);
+        assert_eq!(glyphs[0].height, 6);
+        assert_eq!(glyphs[0].x_offset, 0);
+        assert_eq!(glyphs[0].y_offset, 6);
+        assert_eq!(glyphs[0].bitmap.len(), 24);
+    }
+
     fn glyph(height: u16, y_offset: i16) -> BitmapGlyph {
         glyph_for_codepoint('A', 1, height, y_offset)
     }
@@ -245,7 +381,7 @@ mod tests {
             x_min: 0,
             y_min: y_offset - height as i16,
             advance_width: 1,
-            bitmap: vec![true; height as usize],
+            bitmap: vec![255; width as usize * height as usize],
         }
     }
 }

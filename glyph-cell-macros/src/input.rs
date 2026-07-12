@@ -6,6 +6,7 @@ use syn::{
 pub(crate) struct FontDataInput {
     pub size: LitInt,
     pub ascii_width: Option<LitInt>,
+    pub bpp: Option<LitInt>,
     pub blocks: Vec<FontBlock>,
 }
 
@@ -24,6 +25,7 @@ impl Parse for FontDataInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut size = None;
         let mut ascii_width = None;
+        let mut bpp = None;
         let mut blocks = Vec::new();
         let mut current = None;
 
@@ -34,6 +36,7 @@ impl Parse for FontDataInput {
             match key.to_string().as_str() {
                 "size" | "height" => parse_size(&mut size, key, input)?,
                 "ascii_width" => ascii_width = Some(input.parse()?),
+                "bpp" => bpp = Some(input.parse()?),
                 "path" => {
                     finish_block(&mut blocks, current.take());
                     current = Some(FontBlock {
@@ -47,7 +50,7 @@ impl Parse for FontDataInput {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "expected size, height, ascii_width, path, index, or y_offset",
+                        "expected size, height, ascii_width, bpp, path, index, or y_offset",
                     ));
                 }
             }
@@ -58,7 +61,7 @@ impl Parse for FontDataInput {
         }
 
         finish_block(&mut blocks, current.take());
-        validate(size, ascii_width, blocks, input)
+        validate(size, ascii_width, bpp, blocks, input)
     }
 }
 
@@ -154,6 +157,7 @@ fn finish_block(blocks: &mut Vec<FontBlock>, block: Option<FontBlock>) {
 fn validate(
     size: Option<LitInt>,
     ascii_width: Option<LitInt>,
+    bpp: Option<LitInt>,
     blocks: Vec<FontBlock>,
     input: ParseStream<'_>,
 ) -> Result<FontDataInput> {
@@ -183,6 +187,7 @@ fn validate(
     Ok(FontDataInput {
         size: size.ok_or_else(|| input.error("missing size"))?,
         ascii_width,
+        bpp,
         blocks,
     })
 }
@@ -197,6 +202,7 @@ mod tests {
             r#"
             size: 18,
             ascii_width: 9,
+            bpp: 4,
             path: "font.ttf",
             index: "Ag",
             y_offset: {
@@ -207,6 +213,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(input.ascii_width.unwrap().base10_parse::<u16>().unwrap(), 9);
+        assert_eq!(input.bpp.unwrap().base10_parse::<u8>().unwrap(), 4);
         assert_eq!(input.blocks.len(), 1);
         assert_eq!(input.blocks[0].y_offsets.len(), 1);
         assert_eq!(input.blocks[0].y_offsets[0].codepoint.value(), 'g');

@@ -26,18 +26,33 @@ fn expand(input: FontDataInput) -> syn::Result<proc_macro2::TokenStream> {
         .map(|value| value.base10_parse::<u16>())
         .transpose()?
         .unwrap_or(size);
+    let bpp = input
+        .bpp
+        .as_ref()
+        .map(|value| value.base10_parse::<u8>())
+        .transpose()?
+        .unwrap_or(1);
+    if !matches!(bpp, 1 | 2 | 3 | 4 | 8) {
+        return Err(syn::Error::new(
+            input
+                .bpp
+                .as_ref()
+                .map_or_else(proc_macro2::Span::call_site, |value| value.span()),
+            "bpp must be 1, 2, 3, 4, or 8",
+        ));
+    }
     let blocks = indexed_blocks(input.blocks)?;
     let mut glyphs = Vec::new();
 
     for (block, chars) in blocks {
         let font = source::load_font(&block.path)?;
-        let mut block_glyphs = raster::rasterize_block(&font, size, chars);
+        let mut block_glyphs = raster::rasterize_block(&font, size, bpp, chars)?;
         apply_y_offsets(&mut block_glyphs, &block)?;
         raster::apply_cell_offsets(size, ascii_width, &mut block_glyphs);
         glyphs.extend(block_glyphs);
     }
 
-    let generated = emit::font_expression(size, ascii_width, glyphs)?;
+    let generated = emit::font_expression(size, ascii_width, bpp, glyphs)?;
     Ok(quote! {{ #generated }})
 }
 

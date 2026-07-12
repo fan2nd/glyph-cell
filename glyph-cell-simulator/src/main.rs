@@ -3,16 +3,18 @@ use std::{
     fs,
     ops::RangeInclusive,
     path::{Path, PathBuf},
+    ptr::null_mut,
+    slice,
 };
 
 use eframe::egui;
 use embedded_graphics_core::{
-    Drawable, Pixel,
+    Pixel,
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Point, Size},
     pixelcolor::{Rgb888, RgbColor},
 };
-use fontdue::{Font, FontSettings};
+use freetype::freetype as ft;
 use glyph_cell::{
     Alignment, DebugBoxKind, DrawableText, FontData as GlyphCellFontData, Glyph, TextStyle,
 };
@@ -44,6 +46,7 @@ struct SimulatorApp {
     font_size: u16,
     font_cache: FontCache,
     ascii_width: u32,
+    bpp: u8,
     spacing: i32,
     line_spacing: i32,
     glyph_y_offsets: String,
@@ -75,6 +78,7 @@ impl SimulatorApp {
             font_cache: FontCache::default(),
             system_fonts,
             ascii_width: 10,
+            bpp: 4,
             spacing: 1,
             line_spacing: 0,
             glyph_y_offsets: String::new(),
@@ -221,6 +225,13 @@ impl SimulatorApp {
         stepped_slider_u32(ui, "Collection index", &mut self.collection_index, 0..=8, 1);
         stepped_slider_u16(ui, "Raster size", &mut self.font_size, 4..=96, 1);
         stepped_slider_u32(ui, "ASCII cell width", &mut self.ascii_width, 1..=128, 1);
+        egui::ComboBox::from_label("Bpp")
+            .selected_text(self.bpp.to_string())
+            .show_ui(ui, |ui| {
+                for bpp in [1, 2, 4, 8] {
+                    ui.selectable_value(&mut self.bpp, bpp, bpp.to_string());
+                }
+            });
         ui.label("Glyph y_offset tweaks");
         ui.add(
             egui::TextEdit::multiline(&mut self.glyph_y_offsets)
@@ -249,6 +260,13 @@ impl SimulatorApp {
                     "Missing glyphs in selected font: {}",
                     self.font_cache.missing_chars
                 ),
+            );
+        }
+
+        if !self.font_cache.clipped_chars.is_empty() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!("Clipped glyphs: {}", self.font_cache.clipped_chars),
             );
         }
     }
@@ -340,29 +358,12 @@ impl SimulatorApp {
                     let min = rect.min + egui::vec2(x as f32 * self.zoom, y as f32 * self.zoom);
                     let pixel_rect =
                         egui::Rect::from_min_size(min, egui::Vec2::splat(self.zoom.ceil()));
-                    painter.rect_filled(pixel_rect, 0.0, rgb_to_egui(color));
+                    painter.rect_filled(pixel_rect, 0.0, color);
                 }
             }
         }
 
-        if self.zoom >= 6.0 {
-            let stroke =
-                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
-            for x in 0..=frame.width {
-                let px = rect.left() + x as f32 * self.zoom;
-                painter.line_segment(
-                    [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-                    stroke,
-                );
-            }
-            for y in 0..=frame.height {
-                let py = rect.top() + y as f32 * self.zoom;
-                painter.line_segment(
-                    [egui::pos2(rect.left(), py), egui::pos2(rect.right(), py)],
-                    stroke,
-                );
-            }
-        }
+        draw_preview_grid(ui, &painter, rect, frame.width, frame.height, self.zoom);
 
         ui.add_space(8.0);
         let measurement = self.measurement();
@@ -376,7 +377,10 @@ impl SimulatorApp {
         let mut frame = FrameBuffer::new(self.canvas_width, self.canvas_height);
         let font_data = self.font_cache.data.as_font_data();
         let text = self.drawable_text(&font_data, self.glyph_color);
-        let _ = text.draw(&mut frame);
+        let _ = text.for_each_coverage_pixel(|point, coverage| {
+            frame.blend_pixel(point, self.glyph_color, coverage);
+            Ok::<(), Infallible>(())
+        });
 
         if self.debug_overlays.has_any() {
             for kind in self.debug_overlays.kinds() {
@@ -423,6 +427,8 @@ impl SimulatorApp {
     fn ensure_font(&mut self) {
         let Some(path) = self.current_font_path() else {
             self.font_cache.error = Some("No font path selected".to_owned());
+            self.font_cache.missing_chars.clear();
+            self.font_cache.clipped_chars.clear();
             return;
         };
 
@@ -432,6 +438,7 @@ impl SimulatorApp {
             collection_index: self.collection_index,
             size: self.font_size,
             ascii_width: self.ascii_width,
+            bpp: self.bpp,
             index,
             y_offsets: self.glyph_y_offsets.clone(),
         };
@@ -445,6 +452,7 @@ impl SimulatorApp {
             self.collection_index,
             self.font_size,
             self.ascii_width as u16,
+            self.bpp,
             &key.index,
             &self.glyph_y_offsets,
         ) {
@@ -452,11 +460,14 @@ impl SimulatorApp {
                 self.font_cache.key = Some(key);
                 self.font_cache.data = build.data;
                 self.font_cache.missing_chars = build.missing_chars;
+                self.font_cache.clipped_chars = build.clipped_chars;
                 self.font_cache.error = None;
             }
             Err(err) => {
                 self.font_cache.key = Some(key);
                 self.font_cache.error = Some(err);
+                self.font_cache.missing_chars.clear();
+                self.font_cache.clipped_chars.clear();
             }
         }
     }
@@ -511,9 +522,10 @@ impl SimulatorApp {
         let y_offsets = self.example_y_offsets();
 
         format!(
-            "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
+            "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    bpp: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
             self.font_size,
             self.ascii_width,
+            self.bpp,
             path,
             index,
             y_offsets,
@@ -621,24 +633,123 @@ fn stepped_slider_f32(
 }
 
 fn number_stepper_u32(ui: &mut egui::Ui, value: &mut u32, range: RangeInclusive<u32>, step: u32) {
-    ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
+    let min = *range.start();
+    let max = *range.end();
+    let mut response = ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
+    if let Some(direction) = hovered_scroll_direction(ui, &response) {
+        let next = if direction > 0 {
+            value.saturating_add(step).min(max)
+        } else {
+            value.saturating_sub(step).max(min)
+        };
+        if *value != next {
+            *value = next;
+            response.mark_changed();
+        }
+    }
 }
 
 fn number_stepper_u16(ui: &mut egui::Ui, value: &mut u16, range: RangeInclusive<u16>, step: u16) {
-    ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
+    let min = *range.start();
+    let max = *range.end();
+    let mut response = ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
+    if let Some(direction) = hovered_scroll_direction(ui, &response) {
+        let next = if direction > 0 {
+            value.saturating_add(step).min(max)
+        } else {
+            value.saturating_sub(step).max(min)
+        };
+        if *value != next {
+            *value = next;
+            response.mark_changed();
+        }
+    }
 }
 
 fn number_stepper_i32(ui: &mut egui::Ui, value: &mut i32, range: RangeInclusive<i32>, step: i32) {
-    ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
+    let min = *range.start();
+    let max = *range.end();
+    let mut response = ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
+    if let Some(direction) = hovered_scroll_direction(ui, &response) {
+        let next = if direction > 0 {
+            value.saturating_add(step).min(max)
+        } else {
+            value.saturating_sub(step).max(min)
+        };
+        if *value != next {
+            *value = next;
+            response.mark_changed();
+        }
+    }
 }
 
 fn number_stepper_f32(ui: &mut egui::Ui, value: &mut f32, range: RangeInclusive<f32>, step: f32) {
-    ui.add(
+    let min = *range.start();
+    let max = *range.end();
+    let mut response = ui.add(
         egui::DragValue::new(value)
             .speed(step as f64)
             .range(range)
             .max_decimals(2),
     );
+    if let Some(direction) = hovered_scroll_direction(ui, &response) {
+        let next = (*value + step * direction as f32).clamp(min, max);
+        if *value != next {
+            *value = next;
+            response.mark_changed();
+        }
+    }
+}
+
+fn hovered_scroll_direction(ui: &mut egui::Ui, response: &egui::Response) -> Option<i32> {
+    if !response.hovered() {
+        return None;
+    }
+
+    let scroll_y = ui.input(|input| input.raw_scroll_delta.y);
+    if scroll_y == 0.0 {
+        return None;
+    }
+
+    ui.input_mut(|input| {
+        input.raw_scroll_delta.y = 0.0;
+        input.smooth_scroll_delta.y = 0.0;
+    });
+
+    Some(if scroll_y > 0.0 { 1 } else { -1 })
+}
+
+fn draw_preview_grid(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    width: u32,
+    height: u32,
+    zoom: f32,
+) {
+    let color = preview_grid_color(ui, zoom);
+    let stroke = egui::Stroke::new(1.0, color);
+
+    for x in 0..=width {
+        let px = rect.left() + x as f32 * zoom;
+        painter.line_segment(
+            [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
+            stroke,
+        );
+    }
+    for y in 0..=height {
+        let py = rect.top() + y as f32 * zoom;
+        painter.line_segment(
+            [egui::pos2(rect.left(), py), egui::pos2(rect.right(), py)],
+            stroke,
+        );
+    }
+}
+
+fn preview_grid_color(ui: &egui::Ui, zoom: f32) -> egui::Color32 {
+    let base = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let alpha = (24.0 + zoom * 8.0).round().clamp(28.0, 128.0) as u8;
+    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha)
 }
 
 fn toggle_debug_box(ui: &mut egui::Ui, label: &str, kind: DebugBoxKind, enabled: &mut bool) {
@@ -810,6 +921,7 @@ struct FontBuildKey {
     collection_index: u32,
     size: u16,
     ascii_width: u32,
+    bpp: u8,
     index: String,
     y_offsets: String,
 }
@@ -818,6 +930,7 @@ struct FontCache {
     key: Option<FontBuildKey>,
     data: OwnedFontData,
     missing_chars: String,
+    clipped_chars: String,
     error: Option<String>,
 }
 
@@ -833,6 +946,7 @@ impl Default for FontCache {
             key: None,
             data: OwnedFontData::fallback(),
             missing_chars: String::new(),
+            clipped_chars: String::new(),
             error: None,
         }
     }
@@ -842,6 +956,7 @@ struct OwnedFontData {
     index: String,
     size: u16,
     ascii_width: u16,
+    bpp: u8,
     bitmap: Vec<u8>,
     glyphs: Vec<Glyph>,
 }
@@ -852,6 +967,7 @@ impl OwnedFontData {
             index: &self.index,
             size: self.size,
             ascii_width: self.ascii_width,
+            bpp: self.bpp,
             bitmap: &self.bitmap,
             glyphs: &self.glyphs,
         }
@@ -862,6 +978,7 @@ impl OwnedFontData {
             index: "A".to_owned(),
             size: 7,
             ascii_width: 5,
+            bpp: 1,
             bitmap: vec![0b01110100, 0b01100011, 0b11111000, 0b11000110, 0b00100000],
             glyphs: vec![Glyph {
                 bitmap_offset: 0,
@@ -881,12 +998,13 @@ impl OwnedFontData {
 struct FontBuild {
     data: OwnedFontData,
     missing_chars: String,
+    clipped_chars: String,
 }
 
 struct FrameBuffer {
     width: u32,
     height: u32,
-    pixels: Vec<Option<Rgb888>>,
+    pixels: Vec<Option<egui::Color32>>,
 }
 
 impl FrameBuffer {
@@ -898,8 +1016,46 @@ impl FrameBuffer {
         }
     }
 
-    fn pixel(&self, x: u32, y: u32) -> Option<Rgb888> {
+    fn pixel(&self, x: u32, y: u32) -> Option<egui::Color32> {
         self.pixels[(y * self.width + x) as usize]
+    }
+
+    fn blend_pixel(&mut self, point: Point, color: egui::Color32, coverage: u8) {
+        let Some(index) = self.pixel_index(point) else {
+            return;
+        };
+        if coverage == 0 {
+            return;
+        }
+
+        let alpha = ((coverage as u16 * color.a() as u16 + 127) / 255) as u8;
+        self.pixels[index] = Some(egui::Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            alpha,
+        ));
+    }
+
+    fn set_pixel(&mut self, point: Point, color: egui::Color32) {
+        let Some(index) = self.pixel_index(point) else {
+            return;
+        };
+        self.pixels[index] = Some(color);
+    }
+
+    fn pixel_index(&self, point: Point) -> Option<usize> {
+        if point.x < 0 || point.y < 0 {
+            return None;
+        }
+
+        let x = point.x as u32;
+        let y = point.y as u32;
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        Some((y * self.width + x) as usize)
     }
 }
 
@@ -918,17 +1074,7 @@ impl DrawTarget for FrameBuffer {
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
         for Pixel(point, color) in pixels {
-            if point.x < 0 || point.y < 0 {
-                continue;
-            }
-
-            let x = point.x as u32;
-            let y = point.y as u32;
-            if x >= self.width || y >= self.height {
-                continue;
-            }
-
-            self.pixels[(y * self.width + x) as usize] = Some(color);
+            self.set_pixel(point, rgb_to_egui(color));
         }
 
         Ok(())
@@ -940,65 +1086,243 @@ fn build_font_data(
     collection_index: u32,
     size: u16,
     ascii_width: u16,
+    bpp: u8,
     index: &str,
     y_offset_tweaks: &str,
 ) -> Result<FontBuild, String> {
     let bytes = fs::read(path).map_err(|err| format!("Failed to read font file: {err}"))?;
-    let font = Font::from_bytes(
-        bytes,
-        FontSettings {
-            collection_index,
-            ..FontSettings::default()
-        },
-    )
-    .map_err(|err| format!("Failed to parse font file: {err}"))?;
+    let font = PreviewFreeTypeFont::new(bytes, collection_index as isize)?;
+    font.set_pixel_size(size)?;
 
     let mut glyphs = Vec::new();
-    let mut bitmap = Vec::new();
+    let mut bitmaps = Vec::new();
     let mut missing_chars = String::new();
+    let mut clipped_chars = String::new();
 
     for ch in index.chars() {
         if !font.has_glyph(ch) {
             missing_chars.push(ch);
         }
 
-        let (metrics, coverage) = font.rasterize(ch, size as f32);
-        let width = metrics.width.max(1).min(u16::MAX as usize) as u16;
-        let height = metrics.height.max(1).min(u16::MAX as usize) as u16;
-        let pixels = if metrics.width == 0 || metrics.height == 0 {
-            vec![false; width as usize * height as usize]
-        } else {
-            coverage.into_iter().map(|alpha| alpha >= 96).collect()
-        };
-        let bitmap_offset = bitmap.len() as u32;
-        pack_bpp1(&pixels, &mut bitmap);
+        let rasterized = font.rasterize_glyph(ch, bpp)?;
+        bitmaps.push(rasterized.bitmap);
 
         glyphs.push(Glyph {
-            bitmap_offset,
-            width,
-            height,
+            bitmap_offset: 0,
+            width: rasterized.width,
+            height: rasterized.height,
             cell_width: 0,
             x_offset: 0,
-            y_offset: glyph_y_offset(metrics.height, metrics.ymin),
-            x_min: clamp_i32_to_i16(metrics.xmin),
-            y_min: clamp_i32_to_i16(metrics.ymin),
-            advance_width: advance_width_pixels(metrics.advance_width),
+            y_offset: rasterized.y_offset,
+            x_min: rasterized.x_min,
+            y_min: rasterized.y_min,
+            advance_width: rasterized.advance_width,
         });
     }
     apply_auto_y_offsets(size, index, &mut glyphs);
     apply_y_offset_tweaks(&mut glyphs, index, y_offset_tweaks)?;
     apply_cell_offsets(size, ascii_width, index, &mut glyphs);
 
+    let mut bitmap = Vec::new();
+    for ((ch, glyph), pixels) in index.chars().zip(glyphs.iter_mut()).zip(bitmaps.iter_mut()) {
+        if fit_glyph_to_cell(size, glyph, pixels) {
+            clipped_chars.push(ch);
+        }
+        glyph.bitmap_offset = bitmap.len() as u32;
+        pack_pixels(pixels, bpp, &mut bitmap);
+    }
+
     Ok(FontBuild {
         data: OwnedFontData {
             index: index.to_owned(),
             size,
             ascii_width,
+            bpp,
             bitmap,
             glyphs,
         },
         missing_chars,
+        clipped_chars,
     })
+}
+
+struct PreviewFreeTypeFont {
+    library: ft::FT_Library,
+    face: ft::FT_Face,
+    _bytes: Vec<u8>,
+}
+
+impl PreviewFreeTypeFont {
+    fn new(bytes: Vec<u8>, face_index: isize) -> Result<Self, String> {
+        let mut library = null_mut();
+        ft_ok(
+            unsafe { ft::FT_Init_FreeType(&mut library) },
+            "initialize FreeType",
+        )?;
+
+        let mut face = null_mut();
+        let face_result = ft_ok(
+            unsafe {
+                ft::FT_New_Memory_Face(
+                    library,
+                    bytes.as_ptr(),
+                    bytes.len() as ft::FT_Long,
+                    face_index as ft::FT_Long,
+                    &mut face,
+                )
+            },
+            "parse font",
+        );
+
+        if let Err(err) = face_result {
+            unsafe {
+                let _ = ft::FT_Done_FreeType(library);
+            }
+            return Err(err);
+        }
+
+        Ok(Self {
+            library,
+            face,
+            _bytes: bytes,
+        })
+    }
+
+    fn set_pixel_size(&self, height: u16) -> Result<(), String> {
+        ft_ok(
+            unsafe { ft::FT_Set_Char_Size(self.face, 0, height as ft::FT_F26Dot6 * 64, 300, 300) },
+            "set character size",
+        )?;
+        ft_ok(
+            unsafe { ft::FT_Set_Pixel_Sizes(self.face, 0, height as u32) },
+            "set pixel size",
+        )
+    }
+
+    fn has_glyph(&self, ch: char) -> bool {
+        unsafe { ft::FT_Get_Char_Index(self.face, ch as ft::FT_ULong) != 0 }
+    }
+
+    fn rasterize_glyph(&self, ch: char, bpp: u8) -> Result<RasterizedGlyph, String> {
+        let glyph_index = unsafe { ft::FT_Get_Char_Index(self.face, ch as ft::FT_ULong) };
+        let load_flags = glyph_load_flags(bpp);
+        ft_ok(
+            unsafe { ft::FT_Load_Glyph(self.face, glyph_index, load_flags) },
+            "load glyph",
+        )?;
+        let slot = unsafe { (*self.face).glyph };
+
+        let slot = unsafe { &*slot };
+        let raw_width = slot.bitmap.width as usize;
+        let raw_height = slot.bitmap.rows as usize;
+        let width = raw_width.max(1).min(u16::MAX as usize) as u16;
+        let height = raw_height.max(1).min(u16::MAX as usize) as u16;
+
+        Ok(RasterizedGlyph {
+            width,
+            height,
+            x_min: clamp_i32_to_i16(slot.bitmap_left),
+            y_min: clamp_i32_to_i16(slot.bitmap_top - raw_height as i32),
+            y_offset: clamp_i32_to_i16(slot.bitmap_top),
+            advance_width: advance_width_pixels_16dot16(slot.linearHoriAdvance),
+            bitmap: bitmap_pixels(&slot.bitmap, width, height),
+        })
+    }
+}
+
+impl Drop for PreviewFreeTypeFont {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.face.is_null() {
+                let _ = ft::FT_Done_Face(self.face);
+            }
+            if !self.library.is_null() {
+                let _ = ft::FT_Done_FreeType(self.library);
+            }
+        }
+    }
+}
+
+struct RasterizedGlyph {
+    width: u16,
+    height: u16,
+    x_min: i16,
+    y_min: i16,
+    y_offset: i16,
+    advance_width: u16,
+    bitmap: Vec<u8>,
+}
+
+fn bitmap_pixels(bitmap: &ft::FT_Bitmap, width: u16, height: u16) -> Vec<u8> {
+    let width = width as usize;
+    let height = height as usize;
+    if bitmap.buffer.is_null() || bitmap.width == 0 || bitmap.rows == 0 {
+        return vec![0; width * height];
+    }
+
+    let pitch = bitmap.pitch;
+    let row_bytes = pitch.unsigned_abs() as usize;
+    let buffer = unsafe { slice::from_raw_parts(bitmap.buffer, row_bytes * bitmap.rows as usize) };
+    let mut pixels = vec![0; width * height];
+
+    for y in 0..height.min(bitmap.rows as usize) {
+        let source_y = if pitch >= 0 {
+            y
+        } else {
+            bitmap.rows as usize - 1 - y
+        };
+        let row = source_y * row_bytes;
+        for x in 0..width.min(bitmap.width as usize) {
+            pixels[y * width + x] = match bitmap.pixel_mode as u32 {
+                value if value == ft::FT_Pixel_Mode::FT_PIXEL_MODE_MONO as u32 => {
+                    let byte = buffer[row + x / 8];
+                    if byte & (0x80 >> (x % 8)) != 0 {
+                        255
+                    } else {
+                        0
+                    }
+                }
+                value if value == ft::FT_Pixel_Mode::FT_PIXEL_MODE_GRAY as u32 => buffer[row + x],
+                _ => 0,
+            };
+        }
+    }
+
+    pixels
+}
+
+fn ft_ok(error: ft::FT_Error, action: &str) -> Result<(), String> {
+    if error == ft::FT_Err_Ok as ft::FT_Error {
+        Ok(())
+    } else {
+        Err(format!("Failed to {action}: FreeType error {error}"))
+    }
+}
+
+fn advance_width_pixels_16dot16(advance_width: ft::FT_Fixed) -> u16 {
+    if advance_width <= 0 {
+        0
+    } else {
+        ((advance_width as i64 + 65535) / 65536).min(u16::MAX as i64) as u16
+    }
+}
+
+fn ft_load_target_mono() -> i32 {
+    2 << 16
+}
+
+fn ft_load_target_light() -> i32 {
+    1 << 16
+}
+
+fn glyph_load_flags(bpp: u8) -> i32 {
+    let mut flags = ft::FT_LOAD_RENDER as i32 | ft::FT_LOAD_FORCE_AUTOHINT as i32;
+    if bpp == 1 {
+        flags |= ft_load_target_mono() | ft::FT_LOAD_MONOCHROME as i32;
+    } else {
+        flags |= ft_load_target_light();
+    }
+    flags
 }
 
 fn apply_cell_offsets(raster_height: u16, ascii_width: u16, index: &str, glyphs: &mut [Glyph]) {
@@ -1012,8 +1336,50 @@ fn apply_cell_offsets(raster_height: u16, ascii_width: u16, index: &str, glyphs:
     }
 }
 
-fn glyph_y_offset(height: usize, y_min: i32) -> i16 {
-    clamp_i32_to_i16(height as i32 + y_min)
+fn fit_glyph_to_cell(raster_height: u16, glyph: &mut Glyph, pixels: &mut Vec<u8>) -> bool {
+    let cell_width = glyph.cell_width as i32;
+    let cell_height = raster_height as i32;
+    let left = glyph.x_offset as i32;
+    let top = cell_height - glyph.y_offset as i32;
+    let right = left + glyph.width as i32;
+    let bottom = top + glyph.height as i32;
+
+    let visible_left = left.clamp(0, cell_width);
+    let visible_top = top.clamp(0, cell_height);
+    let visible_right = right.clamp(visible_left, cell_width);
+    let visible_bottom = bottom.clamp(visible_top, cell_height);
+
+    let new_width = (visible_right - visible_left) as u16;
+    let new_height = (visible_bottom - visible_top) as u16;
+    let source_x = (visible_left - left).max(0) as usize;
+    let source_y = (visible_top - top).max(0) as usize;
+    let old_width = glyph.width as usize;
+    let old_height = glyph.height as usize;
+
+    if source_x == 0
+        && source_y == 0
+        && new_width as usize == old_width
+        && new_height as usize == old_height
+    {
+        return false;
+    }
+
+    let mut clipped = vec![0; new_width as usize * new_height as usize];
+    for y in 0..new_height as usize {
+        for x in 0..new_width as usize {
+            clipped[y * new_width as usize + x] = pixels[(source_y + y) * old_width + source_x + x];
+        }
+    }
+
+    let cropped_bottom = (bottom - visible_bottom).max(0);
+    glyph.width = new_width;
+    glyph.height = new_height;
+    glyph.x_offset = clamp_i32_to_i16(visible_left);
+    glyph.y_offset = clamp_i32_to_i16(cell_height - visible_top);
+    glyph.x_min = offset_i16_i32(glyph.x_min, source_x as i32);
+    glyph.y_min = offset_i16_i32(glyph.y_min, cropped_bottom);
+    *pixels = clipped;
+    true
 }
 
 fn centered_offset(outer: u16, inner: u16) -> i16 {
@@ -1148,19 +1514,24 @@ fn parse_y_offset_char(input: &str, line: usize) -> Result<char, String> {
     Ok(codepoint)
 }
 
-fn pack_bpp1(pixels: &[bool], out: &mut Vec<u8>) {
+fn pack_pixels(pixels: &[u8], bpp: u8, out: &mut Vec<u8>) {
     let mut byte = 0u8;
-    for (index, pixel) in pixels.iter().enumerate() {
-        if *pixel {
-            byte |= 1 << (7 - index % 8);
-        }
-        if index % 8 == 7 {
-            out.push(byte);
-            byte = 0;
+    let mut used_bits = 0u8;
+
+    for pixel in pixels {
+        let sample = pixel >> (8 - bpp);
+        for bit_offset in (0..bpp).rev() {
+            byte |= ((sample >> bit_offset) & 1) << (7 - used_bits);
+            used_bits += 1;
+            if used_bits == 8 {
+                out.push(byte);
+                byte = 0;
+                used_bits = 0;
+            }
         }
     }
 
-    if !pixels.len().is_multiple_of(8) {
+    if used_bits != 0 {
         out.push(byte);
     }
 }
@@ -1372,16 +1743,6 @@ fn font_priority(name: &str) -> u8 {
         3
     } else {
         10
-    }
-}
-
-fn advance_width_pixels(advance_width: f32) -> u16 {
-    if !advance_width.is_finite() || advance_width <= 0.0 {
-        0
-    } else if advance_width >= u16::MAX as f32 {
-        u16::MAX
-    } else {
-        advance_width.ceil() as u16
     }
 }
 

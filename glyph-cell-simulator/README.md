@@ -8,7 +8,7 @@ crate.
 
 The simulator loads a CJK-capable system font into `egui` on startup so Chinese
 text in controls and code previews does not render as tofu boxes. Preview glyphs
-are rasterized at runtime with `fontdue` from either:
+are rasterized at runtime with FreeType from either:
 
 - a discovered system `.ttf`, `.otf`, or `.ttc` font
 - a user-provided font file path
@@ -20,6 +20,11 @@ offset. `ASCII cell width` is a font generation parameter; non-ASCII characters
 use the raster height as their cell width. Proportional layout uses each glyph's
 actual bitmap width while keeping the raster height for its display cell. Both
 layout modes expose character spacing and line spacing controls.
+
+The bpp control matches the macro's bitmap depth. Multi-bpp previews use
+coverage blending instead of binary dithering, so 4bpp and 8bpp output show the
+anti-aliased shape FreeType produced. The simulator also warns when glyphs are
+missing from the selected font or clipped by the generated cell.
 
 The `Glyph y_offset tweaks` field accepts one tweak per line, for example
 `g: -1` or `A: 1`. These preview tweaks use the same pixel-delta semantics as
