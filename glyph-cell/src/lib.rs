@@ -12,5 +12,5 @@ mod debug;
 pub use debug::DebugBoxKind;
 pub use font::{FontData, Glyph};
 pub use glyph_cell_macros::font_data;
-pub use style::{Alignment, CellSizes, HorizontalAlignment, TextStyle, VerticalAlignment};
+pub use style::{Alignment, HorizontalAlignment, TextLayout, TextStyle, VerticalAlignment};
 pub use text::DrawableText;

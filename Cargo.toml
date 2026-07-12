@@ -2,5 +2,6 @@
 members = [
     "glyph-cell",
     "glyph-cell-macros",
+    "glyph-cell-simulator",
 ]
 resolver = "2"

@@ -2,8 +2,9 @@ use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor, prel
 use glyph_cell::*;
 
 const FONT: FontData<'static> = FontData {
-    index: "AB你g",
-    char_size: 5,
+    index: "ABg\u{4f60}",
+    size: 5,
+    ascii_width: 4,
     bitmap: &BITMAP,
     glyphs: &GLYPHS,
 };
@@ -13,45 +14,77 @@ const GLYPHS: [Glyph; 4] = [
         bitmap_offset: 0,
         width: 3,
         height: 5,
-        x_offset: 0,
+        cell_width: 4,
+        x_offset: 1,
         y_offset: 5,
+        x_min: 0,
+        y_min: 0,
+        advance_width: 4,
     },
     Glyph {
         bitmap_offset: 2,
         width: 3,
         height: 5,
-        x_offset: 0,
+        cell_width: 4,
+        x_offset: 1,
         y_offset: 5,
+        x_min: 0,
+        y_min: 0,
+        advance_width: 5,
     },
     Glyph {
         bitmap_offset: 4,
-        width: 2,
-        height: 5,
-        x_offset: 0,
-        y_offset: 5,
-    },
-    Glyph {
-        bitmap_offset: 6,
         width: 1,
         height: 1,
-        x_offset: 0,
+        cell_width: 4,
+        x_offset: 2,
         y_offset: 1,
+        x_min: 0,
+        y_min: 0,
+        advance_width: 2,
+    },
+    Glyph {
+        bitmap_offset: 5,
+        width: 1,
+        height: 1,
+        cell_width: 5,
+        x_offset: 2,
+        y_offset: 3,
+        x_min: 0,
+        y_min: 2,
+        advance_width: 2,
     },
 ];
 
 // A: .#./#.#/###/#.#/#.#
 // B: ##./#.#/##./#.#/##.
-// 你: ##/##/##/##/## (placeholder bitmap for API test)
 // g: #
-const BITMAP: [u8; 7] = [
-    0b01010111, 0b11011010, 0b00110101, 0b11010111, 0b11000011, 0b11000011, 0b10000000,
+// U+4F60: #
+const BITMAP: [u8; 6] = [
+    0b01010111, 0b11011010, 0b11010111, 0b01011100, 0b10000000, 0b10000000,
 ];
 
-fn style(ascii: Size, cjk: Size) -> TextStyle<BinaryColor> {
+fn monospace() -> TextStyle<BinaryColor> {
     TextStyle::new(BinaryColor::On)
-        .height(ascii.height)
-        .ascii_width(ascii.width)
-        .cjk_width(cjk.width)
+        .monospace()
+        .align(Alignment::TOP_LEFT)
+}
+
+fn monospace_with_spacing(spacing: i32, line_spacing: i32) -> TextStyle<BinaryColor> {
+    TextStyle::new(BinaryColor::On)
+        .monospace_with_spacing(spacing, line_spacing)
+        .align(Alignment::TOP_LEFT)
+}
+
+fn proportional(spacing: i32) -> TextStyle<BinaryColor> {
+    TextStyle::new(BinaryColor::On)
+        .proportional(spacing)
+        .align(Alignment::TOP_LEFT)
+}
+
+fn proportional_with_line_spacing(spacing: i32, line_spacing: i32) -> TextStyle<BinaryColor> {
+    TextStyle::new(BinaryColor::On)
+        .proportional_with_line_spacing(spacing, line_spacing)
         .align(Alignment::TOP_LEFT)
 }
 
@@ -59,182 +92,172 @@ fn style(ascii: Size, cjk: Size) -> TextStyle<BinaryColor> {
 fn finds_glyph_by_index_string() {
     let glyph = FONT.glyph('A').unwrap();
     assert_eq!(glyph.bitmap_offset, 0);
-    assert_eq!(FONT.glyph('你').unwrap().width, 2);
+    assert_eq!(glyph.advance_width, 4);
     assert_eq!(FONT.glyph('Z'), None);
 }
 
 #[test]
-fn measures_ascii_and_cjk_cells_differently() {
-    let text = DrawableText::new(&FONT, "A你B", style(Size::new(4, 5), Size::new(6, 5)));
-
-    let measured = text.measure();
-    assert_eq!(measured, Size::new(14, 5));
+fn font_data_reports_generated_cell_widths() {
+    assert_eq!(FONT.cell_width('A'), 4);
+    assert_eq!(FONT.cell_width('\u{4f60}'), 5);
+    assert_eq!(FONT.cell_width('Z'), 4);
+    assert_eq!(FONT.cell_width('\u{597d}'), 5);
 }
 
 #[test]
-fn measures_multiline_horizontal_text_by_longest_line() {
-    let text = DrawableText::new(&FONT, "A你\nBB", style(Size::new(4, 5), Size::new(6, 5)));
+fn monospace_layout_measures_generated_cells() {
+    let horizontal = DrawableText::new(&FONT, "AB\u{4f60}", monospace());
+    let vertical = DrawableText::new(&FONT, "AB\u{4f60}", monospace()).vertical();
 
-    assert_eq!(text.measure(), Size::new(10, 10));
+    assert_eq!(horizontal.measure(), Size::new(13, 5));
+    assert_eq!(vertical.measure(), Size::new(5, 15));
 }
 
 #[test]
-fn measures_vertical_text_by_columns() {
-    let text =
-        DrawableText::new(&FONT, "A你\nBB", style(Size::new(4, 5), Size::new(6, 5))).vertical();
+fn monospace_layout_uses_fontdata_fallback_cell_widths_for_missing_glyphs() {
+    let horizontal = DrawableText::new(&FONT, "A\u{597d}Z", monospace());
+    let vertical = DrawableText::new(&FONT, "A\u{597d}Z", monospace()).vertical();
 
-    assert_eq!(text.measure(), Size::new(10, 10));
+    assert_eq!(horizontal.measure(), Size::new(13, 5));
+    assert_eq!(vertical.measure(), Size::new(5, 15));
 }
 
 #[test]
-fn draws_vertical_text_top_to_bottom_then_left_to_right() {
+fn monospace_layout_measures_spacing_and_line_spacing() {
+    let horizontal = DrawableText::new(&FONT, "A\nB", monospace_with_spacing(1, 2));
+    let vertical = DrawableText::new(&FONT, "A\nB", monospace_with_spacing(1, 2)).vertical();
+
+    assert_eq!(horizontal.measure(), Size::new(4, 12));
+    assert_eq!(vertical.measure(), Size::new(10, 5));
+}
+
+#[test]
+fn proportional_layout_measures_actual_widths_and_spacing() {
+    let text = DrawableText::new(&FONT, "AB", proportional(1));
+
+    assert_eq!(text.measure(), Size::new(7, 5));
+}
+
+#[test]
+fn proportional_layout_measures_line_spacing() {
+    let horizontal = DrawableText::new(&FONT, "A\nB", proportional_with_line_spacing(0, 2));
+    let vertical =
+        DrawableText::new(&FONT, "A\nB", proportional_with_line_spacing(0, 2)).vertical();
+
+    assert_eq!(horizontal.measure(), Size::new(3, 12));
+    assert_eq!(vertical.measure(), Size::new(8, 5));
+}
+
+#[test]
+fn proportional_vertical_layout_stacks_upright_display_cells() {
+    let text = DrawableText::new(&FONT, "Ag", proportional(1)).vertical();
+
+    assert_eq!(text.measure(), Size::new(3, 11));
+}
+
+#[test]
+fn missing_glyph_uses_fontdata_cell_width_in_proportional_layout() {
+    let text = DrawableText::new(&FONT, "AZ", proportional(1));
+
+    assert_eq!(text.measure(), Size::new(8, 5));
+}
+
+#[test]
+fn draws_monospace_horizontal_text_from_generated_cells() {
     let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(&FONT, "AB", style(Size::new(4, 5), Size::new(4, 5))).vertical();
+    let text = DrawableText::new(&FONT, "AB", monospace());
+
+    text.draw(&mut display).unwrap();
+
+    display.assert_pattern(&["  #  ## ", " # # # #", " ### ## ", " # # # #", " # # ## "]);
+}
+
+#[test]
+fn draws_monospace_glyphs_at_generated_offsets() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let text = DrawableText::new(&FONT, "A\u{4f60}", monospace());
+
+    text.draw(&mut display).unwrap();
+
+    display.assert_pattern(&["  #    ", " # #   ", " ###  #", " # #   ", " # #   "]);
+}
+
+#[test]
+fn draws_monospace_vertical_text_upright_from_generated_offsets() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let text = DrawableText::new(&FONT, "\u{4f60}A", monospace()).vertical();
 
     text.draw(&mut display).unwrap();
 
     display.assert_pattern(&[
-        " # ", "# #", "###", "# #", "# #", "  #", "# #", " ##", "# #", " ##",
+        "     ", "     ", "  #  ", "     ", "     ", "  #  ", " # # ", " ### ", " # # ", " # # ",
     ]);
 }
 
 #[test]
-fn draws_vertical_multiline_text_in_columns() {
+fn draws_proportional_horizontal_text_using_actual_widths() {
     let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(
-        &FONT,
-        "AB\nA",
-        style(Size::new(4, 5), Size::new(4, 5)).align(Alignment::TOP_LEFT),
-    )
-    .vertical();
+    let text = DrawableText::new(&FONT, "AB", proportional(1));
+
+    text.draw(&mut display).unwrap();
+
+    display.assert_pattern(&[" #  ## ", "# # # #", "### ## ", "# # # #", "# # ## "]);
+}
+
+#[test]
+fn draws_proportional_vertical_text_upright() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let text = DrawableText::new(&FONT, "Ag", proportional(1)).vertical();
 
     text.draw(&mut display).unwrap();
 
     display.assert_pattern(&[
-        " #   # ", "# # # #", "### ###", "# # # #", "# # # #", "  #    ", "# #    ", " ##    ",
-        "# #    ", " ##    ",
+        " # ", "# #", "###", "# #", "# #", "   ", "   ", "   ", "   ", "   ", "#  ",
     ]);
 }
 
 #[test]
-fn draws_ascii_text_from_start_point() {
-    let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(&FONT, "AB", style(Size::new(4, 5), Size::new(4, 5)));
-
-    text.draw(&mut display).unwrap();
-
-    display.assert_pattern(&[" #    #", "# # # #", "###  ##", "# # # #", "# #  ##"]);
-}
-
-#[test]
-fn draws_glyphs_on_a_common_baseline() {
-    let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(&FONT, "Ag", style(Size::new(4, 5), Size::new(4, 5)));
-
-    text.draw(&mut display).unwrap();
-
-    display.assert_pattern(&[" #   ", "# #  ", "###  ", "# #  ", "# # #"]);
-}
-
-#[test]
-fn centers_font_design_square_inside_larger_cell() {
-    let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(&FONT, "A", style(Size::new(7, 7), Size::new(7, 7)));
-
-    text.draw(&mut display).unwrap();
-
-    display.assert_pattern(&[
-        "       ", "  #    ", " # #   ", " ###   ", " # #   ", " # #   ",
-    ]);
-}
-
-#[test]
-fn horizontal_alignment_does_not_move_design_square_inside_layout_cell() {
-    let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(
-        &FONT,
-        "A",
-        style(Size::new(7, 7), Size::new(7, 7)).align(Alignment::TOP_LEFT),
-    )
-    .at(Point::new(0, 0));
-
-    text.draw(&mut display).unwrap();
-
-    display.assert_pattern(&[
-        "       ", "  #    ", " # #   ", " ###   ", " # #   ", " # #   ",
-    ]);
-}
-
-#[test]
-fn horizontal_alignment_keeps_design_square_centered_in_layout_cell() {
-    let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(
-        &FONT,
-        "A",
-        style(Size::new(7, 7), Size::new(7, 7)).align(Alignment::BOTTOM_RIGHT),
-    )
-    .at(Point::new(7, 7));
-
-    text.draw(&mut display).unwrap();
-
-    display.assert_pattern(&[
-        "       ", "  #    ", " # #   ", " ###   ", " # #   ", " # #   ",
-    ]);
-}
-
-#[test]
-fn vertical_alignment_keeps_design_square_centered_in_layout_cell() {
-    let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(
-        &FONT,
-        "A",
-        style(Size::new(7, 7), Size::new(7, 7)).align(Alignment::BOTTOM_RIGHT),
-    )
-    .vertical()
-    .at(Point::new(7, 7));
-
-    text.draw(&mut display).unwrap();
-
-    display.assert_pattern(&[
-        "       ", "  #    ", " # #   ", " ###   ", " # #   ", " # #   ",
-    ]);
-}
-
-#[test]
-fn bottom_right_alignment_anchors_whole_box_above_left_of_point() {
-    let text = DrawableText::new(
-        &FONT,
-        "A你\nB",
-        style(Size::new(4, 5), Size::new(6, 5)).align(Alignment::BOTTOM_RIGHT),
-    )
-    .at(Point::new(20, 30));
-
-    assert_eq!(text.measure(), Size::new(10, 10));
-    assert_eq!(text.bounding_box().top_left, Point::new(10, 20));
-    assert_eq!(
-        text.bounding_box().bottom_right().unwrap(),
-        Point::new(19, 29)
-    );
-}
-
-#[test]
-fn positive_y_offset_moves_glyph_up() {
-    const SHIFTED_FONT: FontData<'static> = FontData {
+fn proportional_glyph_uses_generated_y_offset() {
+    const DESCENDER_FONT: FontData<'static> = FontData {
         index: "Ag",
-        char_size: 5,
+        size: 5,
+        ascii_width: 4,
         bitmap: &BITMAP,
         glyphs: &[
             GLYPHS[0],
             Glyph {
-                y_offset: GLYPHS[3].y_offset + 1,
-                ..GLYPHS[3]
+                y_min: -1,
+                ..GLYPHS[2]
             },
         ],
     };
 
     let mut display = MockDisplay::<BinaryColor>::new();
-    let text = DrawableText::new(&SHIFTED_FONT, "Ag", style(Size::new(4, 5), Size::new(4, 5)));
+    let text = DrawableText::new(&DESCENDER_FONT, "Ag", proportional(0));
     text.draw(&mut display).unwrap();
 
-    display.assert_pattern(&[" #   ", "# #  ", "###  ", "# # #", "# #  "]);
+    display.assert_pattern(&[" #  ", "# # ", "### ", "# # ", "# ##"]);
+}
+
+#[test]
+fn alignment_anchors_measure_box_for_all_nine_positions() {
+    let alignments = [
+        (Alignment::TOP_LEFT, Point::new(20, 30)),
+        (Alignment::TOP_CENTER, Point::new(17, 30)),
+        (Alignment::TOP_RIGHT, Point::new(13, 30)),
+        (Alignment::MIDDLE_LEFT, Point::new(20, 28)),
+        (Alignment::CENTER, Point::new(17, 28)),
+        (Alignment::MIDDLE_RIGHT, Point::new(13, 28)),
+        (Alignment::BOTTOM_LEFT, Point::new(20, 25)),
+        (Alignment::BOTTOM_CENTER, Point::new(17, 25)),
+        (Alignment::BOTTOM_RIGHT, Point::new(13, 25)),
+    ];
+
+    for (alignment, expected_top_left) in alignments {
+        let text =
+            DrawableText::new(&FONT, "AB", proportional(1).align(alignment)).at(Point::new(20, 30));
+
+        assert_eq!(text.measure(), Size::new(7, 5));
+        assert_eq!(text.bounding_box().top_left, expected_top_left);
+    }
 }

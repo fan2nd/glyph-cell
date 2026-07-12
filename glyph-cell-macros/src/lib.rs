@@ -20,16 +20,41 @@ pub fn font_data(input: TokenStream) -> TokenStream {
 
 fn expand(input: FontDataInput) -> syn::Result<proc_macro2::TokenStream> {
     let size = input.size.base10_parse::<u16>()?;
+    let ascii_width = input
+        .ascii_width
+        .as_ref()
+        .map(|value| value.base10_parse::<u16>())
+        .transpose()?
+        .unwrap_or(size);
     let blocks = indexed_blocks(input.blocks)?;
     let mut glyphs = Vec::new();
 
     for (block, chars) in blocks {
         let font = source::load_font(&block.path)?;
-        glyphs.extend(raster::rasterize_block(&font, size, chars));
+        let mut block_glyphs = raster::rasterize_block(&font, size, chars);
+        apply_y_offsets(&mut block_glyphs, &block)?;
+        raster::apply_cell_offsets(size, ascii_width, &mut block_glyphs);
+        glyphs.extend(block_glyphs);
     }
 
-    let generated = emit::font_expression(size, glyphs)?;
+    let generated = emit::font_expression(size, ascii_width, glyphs)?;
     Ok(quote! {{ #generated }})
+}
+
+fn apply_y_offsets(glyphs: &mut [raster::BitmapGlyph], block: &FontBlock) -> syn::Result<()> {
+    for adjustment in &block.y_offsets {
+        let codepoint = adjustment.codepoint.value();
+        let Some(glyph) = glyphs.iter_mut().find(|glyph| glyph.codepoint == codepoint) else {
+            return Err(syn::Error::new(
+                adjustment.codepoint.span(),
+                format!("y_offset character {codepoint:?} is not in this font block index"),
+            ));
+        };
+
+        glyph.y_offset = raster::offset_i16(glyph.y_offset, adjustment.delta);
+    }
+
+    Ok(())
 }
 
 fn indexed_blocks(blocks: Vec<FontBlock>) -> syn::Result<Vec<(FontBlock, Vec<char>)>> {

@@ -1,0 +1,5 @@
+error: y_offset character 'Z' is not in this font block index
+ --> tests/ui/font_data_y_offset_unknown_char_fail.rs:8:9
+  |
+8 |         'Z': 1,
+  |         ^^^

@@ -7,6 +7,12 @@ fn font_data_rejects_duplicate_index_characters() {
 }
 
 #[test]
+fn font_data_rejects_y_offset_for_chars_outside_block() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/font_data_y_offset_unknown_char_fail.rs");
+}
+
+#[test]
 fn old_bitmap_font_macros_are_removed() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/old_bitmap_font_removed_fail.rs");

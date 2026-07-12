@@ -68,50 +68,45 @@ impl Alignment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CellSizes {
-    pub height: u32,
-    pub ascii_width: u32,
-    pub cjk_width: u32,
+pub enum TextLayout {
+    Monospace { spacing: i32, line_spacing: i32 },
+    Proportional { spacing: i32, line_spacing: i32 },
 }
 
-impl CellSizes {
-    pub const fn new(height: u32, ascii_width: u32, cjk_width: u32) -> Self {
-        Self {
-            height,
-            ascii_width,
-            cjk_width,
+impl TextLayout {
+    pub const fn monospace() -> Self {
+        Self::Monospace {
+            spacing: 0,
+            line_spacing: 0,
         }
     }
 
-    pub const fn with_height(mut self, height: u32) -> Self {
-        self.height = height;
-        self
+    pub const fn monospace_with_spacing(spacing: i32, line_spacing: i32) -> Self {
+        Self::Monospace {
+            spacing,
+            line_spacing,
+        }
     }
 
-    pub const fn with_ascii_width(mut self, width: u32) -> Self {
-        self.ascii_width = width;
-        self
+    pub const fn proportional(spacing: i32) -> Self {
+        Self::Proportional {
+            spacing,
+            line_spacing: 0,
+        }
     }
 
-    pub const fn with_cjk_width(mut self, width: u32) -> Self {
-        self.cjk_width = width;
-        self
-    }
-
-    pub const fn for_char(self, ch: char) -> Size {
-        let width = if ch.is_ascii() {
-            self.ascii_width
-        } else {
-            self.cjk_width
-        };
-        Size::new(width, self.height)
+    pub const fn proportional_with_line_spacing(spacing: i32, line_spacing: i32) -> Self {
+        Self::Proportional {
+            spacing,
+            line_spacing,
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextStyle<C: PixelColor> {
     pub color: C,
-    pub cells: CellSizes,
+    pub layout: TextLayout,
     pub alignment: Alignment,
 }
 
@@ -119,23 +114,31 @@ impl<C: PixelColor> TextStyle<C> {
     pub const fn new(color: C) -> Self {
         Self {
             color,
-            cells: CellSizes::new(0, 0, 0),
+            layout: TextLayout::Proportional {
+                spacing: 0,
+                line_spacing: 0,
+            },
             alignment: Alignment::CENTER,
         }
     }
 
-    pub const fn height(mut self, height: u32) -> Self {
-        self.cells = self.cells.with_height(height);
+    pub const fn monospace(mut self) -> Self {
+        self.layout = TextLayout::monospace();
         self
     }
 
-    pub const fn ascii_width(mut self, width: u32) -> Self {
-        self.cells = self.cells.with_ascii_width(width);
+    pub const fn monospace_with_spacing(mut self, spacing: i32, line_spacing: i32) -> Self {
+        self.layout = TextLayout::monospace_with_spacing(spacing, line_spacing);
         self
     }
 
-    pub const fn cjk_width(mut self, width: u32) -> Self {
-        self.cells = self.cells.with_cjk_width(width);
+    pub const fn proportional(mut self, spacing: i32) -> Self {
+        self.layout = TextLayout::proportional(spacing);
+        self
+    }
+
+    pub const fn proportional_with_line_spacing(mut self, spacing: i32, line_spacing: i32) -> Self {
+        self.layout = TextLayout::proportional_with_line_spacing(spacing, line_spacing);
         self
     }
 

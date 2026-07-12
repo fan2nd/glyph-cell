@@ -6,13 +6,12 @@ use embedded_graphics_core::{
 };
 
 use crate::{
-    DrawableText, FontData,
-    layout::{TextRun, design_box_bounds, glyph_box_bounds},
+    DrawableText,
+    layout::{PositionedGlyph, TextRun, glyph_box_bounds},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugBoxKind {
-    Design,
     Cell,
     Glyph,
 }
@@ -22,14 +21,7 @@ impl<'a, C: PixelColor> DrawableText<'a, C> {
     where
         D: DrawTarget<Color = C>,
     {
-        draw_text_boxes(target, self.font_data, self.run(), self.style.color, kind)
-    }
-
-    pub fn draw_design_boxes<D>(&self, target: &mut D) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = C>,
-    {
-        self.draw_debug_boxes(target, DebugBoxKind::Design)
+        draw_text_boxes(target, self.run(), self.style.color, kind)
     }
 
     pub fn draw_cell_boxes<D>(&self, target: &mut D) -> Result<(), D::Error>
@@ -49,7 +41,6 @@ impl<'a, C: PixelColor> DrawableText<'a, C> {
 
 fn draw_text_boxes<D, C>(
     target: &mut D,
-    font: &FontData<'_>,
     run: TextRun<'_>,
     color: C,
     kind: DebugBoxKind,
@@ -58,27 +49,18 @@ where
     D: DrawTarget<Color = C>,
     C: PixelColor,
 {
-    run.for_each_cell(|ch, cell_origin, cell| {
-        if let Some((origin, size)) = box_bounds(font, ch, cell_origin, cell, kind) {
+    run.for_each_positioned_glyph(|positioned| {
+        if let Some((origin, size)) = box_bounds(positioned, kind) {
             draw_outline(target, origin, size, color)?;
         }
         Ok(())
     })
 }
 
-fn box_bounds(
-    font: &FontData<'_>,
-    ch: char,
-    cell_origin: Point,
-    cell: Size,
-    kind: DebugBoxKind,
-) -> Option<(Point, Size)> {
+fn box_bounds(positioned: PositionedGlyph, kind: DebugBoxKind) -> Option<(Point, Size)> {
     match kind {
-        DebugBoxKind::Design => Some(design_box_bounds(font, cell_origin, cell)),
-        DebugBoxKind::Cell => Some((cell_origin, cell)),
-        DebugBoxKind::Glyph => font
-            .glyph(ch)
-            .map(|glyph| glyph_box_bounds(font, glyph, cell_origin, cell)),
+        DebugBoxKind::Cell => Some((positioned.cell_origin, positioned.cell_size)),
+        DebugBoxKind::Glyph => glyph_box_bounds(positioned),
     }
 }
 

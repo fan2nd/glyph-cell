@@ -8,7 +8,7 @@ use embedded_graphics_core::{
 
 use crate::{
     FontData, Glyph, TextStyle,
-    layout::{TextFlow, TextRun, glyph_origin},
+    layout::{TextFlow, TextRun},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,9 +56,10 @@ impl<'a, C: PixelColor> DrawableText<'a, C> {
 
     pub(crate) fn run(&self) -> TextRun<'a> {
         TextRun::new(
+            self.font_data,
             self.text,
             self.start_point,
-            self.style.cells,
+            self.style.layout,
             self.style.alignment,
             self.flow,
         )
@@ -90,10 +91,9 @@ where
     D: DrawTarget<Color = C>,
     C: PixelColor,
 {
-    run.for_each_cell(|ch, cell_origin, cell| {
-        if let Some(glyph) = font.glyph(ch) {
-            let origin = glyph_origin(font, glyph, cell_origin, cell);
-            draw_glyph(target, font, glyph, origin, color)?;
+    run.for_each_positioned_glyph(|positioned| {
+        if let (Some(glyph), Some(origin)) = (positioned.glyph, positioned.glyph_origin) {
+            draw_glyph(target, font, &glyph, origin, color)?;
         }
         Ok(())
     })
