@@ -1,13 +1,14 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use core::convert::Infallible;
 use std::{
     fs,
-    ops::RangeInclusive,
     path::{Path, PathBuf},
     ptr::null_mut,
     slice,
+    sync::Mutex,
 };
 
-use eframe::egui;
 use embedded_graphics_core::{
     Drawable, Pixel,
     draw_target::DrawTarget,
@@ -18,33 +19,57 @@ use freetype::freetype as ft;
 use glyph_cell::{
     Alignment, DebugBoxKind, DrawableText, FontData as GlyphCellFontData, Glyph, TextStyle,
 };
+use serde::{Deserialize, Serialize};
+use tauri::State;
 
-fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1180.0, 760.0]),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "glyph-cell simulator",
-        options,
-        Box::new(|cc| Ok(Box::new(SimulatorApp::new(cc)))),
-    )
+fn main() {
+    tauri::Builder::default()
+        .manage(SimulatorState::new())
+        .invoke_handler(tauri::generate_handler![
+            get_initial_state,
+            render_preview,
+            refresh_system_fonts,
+            choose_font_file,
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run glyph-cell simulator");
 }
 
-struct SimulatorApp {
+struct SimulatorState {
+    system_fonts: Mutex<Vec<SystemFont>>,
+    font_cache: Mutex<FontCache>,
+}
+
+impl SimulatorState {
+    fn new() -> Self {
+        Self {
+            system_fonts: Mutex::new(discover_system_fonts()),
+            font_cache: Mutex::new(FontCache::default()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialState {
+    settings: SimulatorSettings,
+    system_fonts: Vec<SystemFontDto>,
+    render: RenderResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SimulatorSettings {
     text: String,
     layout_mode: LayoutMode,
     flow: FlowMode,
     alignment: AlignmentChoice,
     debug_overlays: DebugOverlays,
     font_source: FontSource,
-    system_fonts: Vec<SystemFont>,
     selected_system_font: usize,
     custom_font_path: String,
     collection_index: u32,
     font_size: u16,
-    font_cache: FontCache,
     ascii_width: u32,
     spacing: i32,
     line_spacing: i32,
@@ -54,16 +79,12 @@ struct SimulatorApp {
     canvas_width: u32,
     canvas_height: u32,
     zoom: f32,
-    glyph_color: egui::Color32,
-    example_panel_open: bool,
+    glyph_color: Color,
 }
 
-impl SimulatorApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let system_fonts = discover_system_fonts();
-        install_ui_font(&cc.egui_ctx, &system_fonts);
-
-        let mut app = Self {
+impl Default for SimulatorSettings {
+    fn default() -> Self {
+        Self {
             text: "AWi\nmg\u{4f60}\u{597d}".to_owned(),
             layout_mode: LayoutMode::Proportional,
             flow: FlowMode::Horizontal,
@@ -74,8 +95,6 @@ impl SimulatorApp {
             custom_font_path: String::new(),
             collection_index: 0,
             font_size: 18,
-            font_cache: FontCache::default(),
-            system_fonts,
             ascii_width: 10,
             spacing: 1,
             line_spacing: 0,
@@ -85,723 +104,404 @@ impl SimulatorApp {
             canvas_width: 180,
             canvas_height: 96,
             zoom: 4.0,
-            glyph_color: egui::Color32::from_rgb(54, 187, 128),
-            example_panel_open: true,
-        };
-        app.ensure_font();
-        app
-    }
-}
-
-impl eframe::App for SimulatorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::SidePanel::left("config")
-            .resizable(true)
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.heading("Parameters");
-                ui.separator();
-                self.font_controls(ui);
-                ui.separator();
-                self.text_controls(ui);
-                ui.separator();
-                self.layout_controls(ui);
-                ui.separator();
-                self.canvas_controls(ui);
-            });
-
-        self.ensure_font();
-
-        self.example_panel(ctx);
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Preview");
-            ui.separator();
-            self.preview(ui);
-        });
-    }
-}
-
-impl SimulatorApp {
-    fn example_panel(&mut self, ctx: &egui::Context) {
-        if self.example_panel_open {
-            egui::SidePanel::right("example")
-                .resizable(true)
-                .default_width(410.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading("Example Code");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(">").on_hover_text("Hide example code").clicked() {
-                                self.example_panel_open = false;
-                            }
-                        });
-                    });
-                    ui.separator();
-                    let mut code = self.example_code();
-                    ui.add(
-                        egui::TextEdit::multiline(&mut code)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_rows(36)
-                            .lock_focus(true),
-                    );
-                });
-        } else {
-            egui::SidePanel::right("example_collapsed")
-                .resizable(false)
-                .exact_width(36.0)
-                .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        if ui.button("<").on_hover_text("Show example code").clicked() {
-                            self.example_panel_open = true;
-                        }
-                    });
-                });
-        }
-    }
-
-    fn font_controls(&mut self, ui: &mut egui::Ui) {
-        let previous_font_source = self.font_source;
-
-        egui::ComboBox::from_label("Font source")
-            .selected_text(self.font_source.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.font_source, FontSource::System, "System font");
-                ui.selectable_value(
-                    &mut self.font_source,
-                    FontSource::Custom,
-                    "Custom font file",
-                );
-            });
-
-        if previous_font_source != FontSource::Custom && self.font_source == FontSource::Custom {
-            self.choose_custom_font_file();
-        }
-
-        match self.font_source {
-            FontSource::System => {
-                if self.system_fonts.is_empty() {
-                    ui.label("No system TTF/OTF/TTC fonts found.");
-                } else {
-                    let selected = self
-                        .system_fonts
-                        .get(self.selected_system_font)
-                        .map(SystemFont::label)
-                        .unwrap_or("No font");
-                    egui::ComboBox::from_label("System font")
-                        .selected_text(selected)
-                        .show_ui(ui, |ui| {
-                            for (index, font) in self.system_fonts.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.selected_system_font,
-                                    index,
-                                    font.label(),
-                                );
-                            }
-                        });
-                }
-
-                if ui.button("Refresh system fonts").clicked() {
-                    self.system_fonts = discover_system_fonts();
-                    self.selected_system_font = self
-                        .selected_system_font
-                        .min(self.system_fonts.len().saturating_sub(1));
-                    self.font_cache.invalidate();
-                }
-            }
-            FontSource::Custom => {
-                if ui.button("Choose font file...").clicked() {
-                    self.choose_custom_font_file();
-                }
-
-                if self.current_custom_font_path().is_none() {
-                    ui.label("No custom font selected.");
-                }
-            }
-        }
-
-        stepped_slider_u32(ui, "Collection index", &mut self.collection_index, 0..=8, 1);
-        stepped_slider_u16(ui, "Raster size", &mut self.font_size, 4..=96, 1);
-        stepped_slider_u32(ui, "ASCII cell width", &mut self.ascii_width, 1..=128, 1);
-        ui.label("Glyph y_offset tweaks");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.glyph_y_offsets)
-                .desired_rows(3)
-                .hint_text("g: -1\nA: 1"),
-        );
-
-        if let Some(path) = self.current_font_path() {
-            ui.label(format!("Path: {}", path.display()));
-        }
-
-        if let Some(error) = self.font_cache.error.as_deref() {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        } else {
-            ui.label(format!(
-                "Loaded glyphs: {} | Index: {}",
-                self.font_cache.data.glyphs.len(),
-                self.font_cache.data.index
-            ));
-        }
-
-        if !self.font_cache.missing_chars.is_empty() {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!(
-                    "Missing glyphs in selected font: {}",
-                    self.font_cache.missing_chars
-                ),
-            );
-        }
-
-        if !self.font_cache.clipped_chars.is_empty() {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!(
-                    "Vertically clipped glyphs: {}",
-                    self.font_cache.clipped_chars
-                ),
-            );
-        }
-    }
-
-    fn text_controls(&mut self, ui: &mut egui::Ui) {
-        ui.label("Text");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.text)
-                .desired_rows(5)
-                .hint_text("Text to render"),
-        );
-
-        egui::ComboBox::from_label("Flow")
-            .selected_text(self.flow.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.flow, FlowMode::Horizontal, "Horizontal");
-                ui.selectable_value(&mut self.flow, FlowMode::Vertical, "Vertical");
-            });
-
-        egui::ComboBox::from_label("Alignment")
-            .selected_text(self.alignment.label())
-            .show_ui(ui, |ui| {
-                for alignment in AlignmentChoice::ALL {
-                    ui.selectable_value(&mut self.alignment, alignment, alignment.label());
-                }
-            });
-
-        ui.horizontal(|ui| {
-            ui.label("Glyph color");
-            ui.color_edit_button_srgba(&mut self.glyph_color);
-        });
-    }
-
-    fn layout_controls(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_label("Layout")
-            .selected_text(self.layout_mode.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.layout_mode, LayoutMode::Monospace, "Monospace");
-                ui.selectable_value(
-                    &mut self.layout_mode,
-                    LayoutMode::Proportional,
-                    "Proportional",
-                );
-            });
-
-        stepped_slider_i32(ui, "Spacing", &mut self.spacing, -16..=48, 1);
-        stepped_slider_i32(ui, "Line spacing", &mut self.line_spacing, -16..=64, 1);
-
-        ui.horizontal(|ui| {
-            ui.label("Debug boxes");
-            toggle_debug_box(
-                ui,
-                "Cell",
-                DebugBoxKind::Cell,
-                &mut self.debug_overlays.cell,
-            );
-            toggle_debug_box(
-                ui,
-                "Glyph",
-                DebugBoxKind::Glyph,
-                &mut self.debug_overlays.glyph,
-            );
-        });
-    }
-
-    fn canvas_controls(&mut self, ui: &mut egui::Ui) {
-        stepped_slider_i32(ui, "Origin X", &mut self.origin_x, -80..=240, 1);
-        stepped_slider_i32(ui, "Origin Y", &mut self.origin_y, -80..=180, 1);
-        stepped_slider_u32(ui, "Canvas width", &mut self.canvas_width, 32..=360, 1);
-        stepped_slider_u32(ui, "Canvas height", &mut self.canvas_height, 24..=240, 1);
-        stepped_slider_f32(ui, "Zoom", &mut self.zoom, 1.0..=16.0, 0.25);
-    }
-
-    fn preview(&self, ui: &mut egui::Ui) {
-        let frame = self.render();
-        let desired_size = egui::vec2(
-            frame.width as f32 * self.zoom,
-            frame.height as f32 * self.zoom,
-        );
-        let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        let background = ui.visuals().extreme_bg_color;
-
-        painter.rect_filled(rect, 0.0, background);
-
-        for y in 0..frame.height {
-            for x in 0..frame.width {
-                if let Some(color) = frame.pixel(x, y) {
-                    let min = rect.min + egui::vec2(x as f32 * self.zoom, y as f32 * self.zoom);
-                    let pixel_rect =
-                        egui::Rect::from_min_size(min, egui::Vec2::splat(self.zoom.ceil()));
-                    painter.rect_filled(pixel_rect, 0.0, color);
-                }
-            }
-        }
-
-        draw_preview_grid(ui, &painter, rect, frame.width, frame.height, self.zoom);
-
-        ui.add_space(8.0);
-        let measurement = self.measurement();
-        ui.label(format!(
-            "Measured text: {} x {} px | Canvas: {} x {} px",
-            measurement.width, measurement.height, frame.width, frame.height
-        ));
-    }
-
-    fn render(&self) -> FrameBuffer {
-        let mut frame = FrameBuffer::new(self.canvas_width, self.canvas_height);
-        let font_data = self.font_cache.data.as_font_data();
-        let text = self.drawable_text(&font_data, self.glyph_color);
-        let _ = text.draw(&mut frame);
-
-        if self.debug_overlays.has_any() {
-            for kind in self.debug_overlays.kinds() {
-                let overlay = self.drawable_text(&font_data, debug_box_color(kind));
-                let _ = overlay.draw_debug_boxes(&mut frame, kind);
-            }
-        }
-
-        frame
-    }
-
-    fn measurement(&self) -> Size {
-        let font_data = self.font_cache.data.as_font_data();
-        self.drawable_text(&font_data, self.glyph_color).measure()
-    }
-
-    fn drawable_text<'a>(
-        &'a self,
-        font_data: &'a GlyphCellFontData<'a>,
-        color: egui::Color32,
-    ) -> DrawableText<'a, Rgb888> {
-        let style = self
-            .style(color)
-            .align(self.alignment.to_glyph_cell_alignment());
-        let text = DrawableText::new(font_data, &self.text, style)
-            .at(Point::new(self.origin_x, self.origin_y));
-
-        match self.flow {
-            FlowMode::Horizontal => text.horizontal(),
-            FlowMode::Vertical => text.vertical(),
-        }
-    }
-
-    fn style(&self, color: egui::Color32) -> TextStyle<Rgb888> {
-        let style = TextStyle::new(egui_to_rgb(color));
-        match self.layout_mode {
-            LayoutMode::Monospace => style.monospace_with_spacing(self.spacing, self.line_spacing),
-            LayoutMode::Proportional => {
-                style.proportional_with_line_spacing(self.spacing, self.line_spacing)
-            }
-        }
-    }
-
-    fn ensure_font(&mut self) {
-        let Some(path) = self.current_font_path() else {
-            self.font_cache.error = Some("No font path selected".to_owned());
-            self.font_cache.missing_chars.clear();
-            self.font_cache.clipped_chars.clear();
-            return;
-        };
-
-        let index = glyph_index_from_text(&self.text);
-        let key = FontBuildKey {
-            path: path.to_string_lossy().into_owned(),
-            collection_index: self.collection_index,
-            size: self.font_size,
-            ascii_width: self.ascii_width,
-            index,
-            y_offsets: self.glyph_y_offsets.clone(),
-        };
-
-        if self.font_cache.key.as_ref() == Some(&key) {
-            return;
-        }
-
-        match build_font_data(
-            &path,
-            self.collection_index,
-            self.font_size,
-            self.ascii_width as u16,
-            &key.index,
-            &self.glyph_y_offsets,
-        ) {
-            Ok(build) => {
-                self.font_cache.key = Some(key);
-                self.font_cache.data = build.data;
-                self.font_cache.missing_chars = build.missing_chars;
-                self.font_cache.clipped_chars = build.clipped_chars;
-                self.font_cache.error = None;
-            }
-            Err(err) => {
-                self.font_cache.key = Some(key);
-                self.font_cache.error = Some(err);
-                self.font_cache.missing_chars.clear();
-                self.font_cache.clipped_chars.clear();
-            }
-        }
-    }
-
-    fn current_font_path(&self) -> Option<PathBuf> {
-        match self.font_source {
-            FontSource::System => self
-                .system_fonts
-                .get(self.selected_system_font)
-                .map(|font| font.path.clone()),
-            FontSource::Custom => self.current_custom_font_path(),
-        }
-    }
-
-    fn current_custom_font_path(&self) -> Option<PathBuf> {
-        let trimmed = self.custom_font_path.trim();
-        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
-    }
-
-    fn choose_custom_font_file(&mut self) {
-        if let Some(path) = pick_font_file(self.current_custom_font_path().as_deref()) {
-            self.custom_font_path = path.to_string_lossy().into_owned();
-            self.font_cache.invalidate();
-        }
-    }
-
-    fn example_code(&self) -> String {
-        let alignment = self.alignment.code_name();
-        let text = rust_string_literal(&self.text);
-        let index = rust_string_literal(&self.font_cache.data.index);
-        let path = self
-            .current_font_path()
-            .map(|path| rust_string_literal(&path.to_string_lossy()))
-            .unwrap_or_else(|| "\"path/to/font.ttf\"".to_owned());
-        let layout = match self.layout_mode {
-            LayoutMode::Monospace if self.spacing == 0 && self.line_spacing == 0 => {
-                "    .monospace()".to_owned()
-            }
-            LayoutMode::Monospace => format!(
-                "    .monospace_with_spacing({}, {})",
-                self.spacing, self.line_spacing
-            ),
-            LayoutMode::Proportional => format!(
-                "    .proportional_with_line_spacing({}, {})",
-                self.spacing, self.line_spacing
-            ),
-        };
-        let flow = match self.flow {
-            FlowMode::Horizontal => String::new(),
-            FlowMode::Vertical => "    .vertical()\n".to_owned(),
-        };
-        let y_offsets = self.example_y_offsets();
-
-        format!(
-            "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
-            self.font_size,
-            self.ascii_width,
-            path,
-            index,
-            y_offsets,
-            self.glyph_color.r(),
-            self.glyph_color.g(),
-            self.glyph_color.b(),
-            layout,
-            alignment,
-            text,
-            flow,
-            self.origin_x,
-            self.origin_y
-        )
-    }
-
-    fn example_y_offsets(&self) -> String {
-        let Ok(offsets) = parse_y_offset_tweaks(&self.glyph_y_offsets, &self.font_cache.data.index)
-        else {
-            return String::new();
-        };
-
-        if offsets.is_empty() {
-            return String::new();
-        }
-
-        let mut out = String::from("    y_offset: {\n");
-        for (codepoint, delta) in offsets {
-            out.push_str("        ");
-            out.push_str(&rust_char_literal(codepoint));
-            out.push_str(": ");
-            out.push_str(&delta.to_string());
-            out.push_str(",\n");
-        }
-        out.push_str("    },\n");
-        out
-    }
-}
-
-fn stepped_slider_u32(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut u32,
-    range: RangeInclusive<u32>,
-    step: u32,
-) {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(value, range.clone())
-                .text(label)
-                .show_value(false),
-        );
-        number_stepper_u32(ui, value, range, step);
-    });
-}
-
-fn stepped_slider_u16(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut u16,
-    range: RangeInclusive<u16>,
-    step: u16,
-) {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(value, range.clone())
-                .text(label)
-                .show_value(false),
-        );
-        number_stepper_u16(ui, value, range, step);
-    });
-}
-
-fn stepped_slider_i32(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut i32,
-    range: RangeInclusive<i32>,
-    step: i32,
-) {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(value, range.clone())
-                .text(label)
-                .show_value(false),
-        );
-        number_stepper_i32(ui, value, range, step);
-    });
-}
-
-fn stepped_slider_f32(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: RangeInclusive<f32>,
-    step: f32,
-) {
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(value, range.clone())
-                .text(label)
-                .show_value(false),
-        );
-        number_stepper_f32(ui, value, range, step);
-    });
-}
-
-fn number_stepper_u32(ui: &mut egui::Ui, value: &mut u32, range: RangeInclusive<u32>, step: u32) {
-    let min = *range.start();
-    let max = *range.end();
-    let mut response = ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
-    if let Some(direction) = hovered_scroll_direction(ui, &response) {
-        let next = if direction > 0 {
-            value.saturating_add(step).min(max)
-        } else {
-            value.saturating_sub(step).max(min)
-        };
-        if *value != next {
-            *value = next;
-            response.mark_changed();
+            glyph_color: Color::rgb(54, 187, 128),
         }
     }
 }
 
-fn number_stepper_u16(ui: &mut egui::Ui, value: &mut u16, range: RangeInclusive<u16>, step: u16) {
-    let min = *range.start();
-    let max = *range.end();
-    let mut response = ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
-    if let Some(direction) = hovered_scroll_direction(ui, &response) {
-        let next = if direction > 0 {
-            value.saturating_add(step).min(max)
-        } else {
-            value.saturating_sub(step).max(min)
-        };
-        if *value != next {
-            *value = next;
-            response.mark_changed();
-        }
+impl SimulatorSettings {
+    fn sanitized(mut self) -> Self {
+        self.collection_index = self.collection_index.min(8);
+        self.font_size = self.font_size.clamp(4, 96);
+        self.ascii_width = self.ascii_width.clamp(1, 128);
+        self.spacing = self.spacing.clamp(-16, 48);
+        self.line_spacing = self.line_spacing.clamp(-16, 64);
+        self.origin_x = self.origin_x.clamp(-80, 240);
+        self.origin_y = self.origin_y.clamp(-80, 180);
+        self.canvas_width = self.canvas_width.clamp(32, 360);
+        self.canvas_height = self.canvas_height.clamp(24, 240);
+        self.zoom = finite_f32(self.zoom).clamp(1.0, 16.0);
+        self
     }
 }
 
-fn number_stepper_i32(ui: &mut egui::Ui, value: &mut i32, range: RangeInclusive<i32>, step: i32) {
-    let min = *range.start();
-    let max = *range.end();
-    let mut response = ui.add(egui::DragValue::new(value).speed(step as f64).range(range));
-    if let Some(direction) = hovered_scroll_direction(ui, &response) {
-        let next = if direction > 0 {
-            value.saturating_add(step).min(max)
-        } else {
-            value.saturating_sub(step).max(min)
-        };
-        if *value != next {
-            *value = next;
-            response.mark_changed();
-        }
-    }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemFontDto {
+    name: String,
+    label: String,
+    path: String,
 }
 
-fn number_stepper_f32(ui: &mut egui::Ui, value: &mut f32, range: RangeInclusive<f32>, step: f32) {
-    let min = *range.start();
-    let max = *range.end();
-    let mut response = ui.add(
-        egui::DragValue::new(value)
-            .speed(step as f64)
-            .range(range)
-            .max_decimals(2),
-    );
-    if let Some(direction) = hovered_scroll_direction(ui, &response) {
-        let next = (*value + step * direction as f32).clamp(min, max);
-        if *value != next {
-            *value = next;
-            response.mark_changed();
-        }
-    }
-}
-
-fn hovered_scroll_direction(ui: &mut egui::Ui, response: &egui::Response) -> Option<i32> {
-    if !response.hovered() {
-        return None;
-    }
-
-    let scroll_y = ui.input(|input| input.raw_scroll_delta.y);
-    if scroll_y == 0.0 {
-        return None;
-    }
-
-    ui.input_mut(|input| {
-        input.raw_scroll_delta.y = 0.0;
-        input.smooth_scroll_delta.y = 0.0;
-    });
-
-    Some(if scroll_y > 0.0 { 1 } else { -1 })
-}
-
-fn draw_preview_grid(
-    ui: &egui::Ui,
-    painter: &egui::Painter,
-    rect: egui::Rect,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderResponse {
     width: u32,
     height: u32,
-    zoom: f32,
+    rgba: Vec<u8>,
+    measurement: Measurement,
+    font: FontReport,
+    example_code: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Measurement {
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FontReport {
+    path: Option<String>,
+    error: Option<String>,
+    loaded_glyphs: usize,
+    index: String,
+    missing_chars: String,
+    clipped_chars: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl Color {
+    const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+#[tauri::command]
+fn get_initial_state(state: State<'_, SimulatorState>) -> Result<InitialState, String> {
+    let settings = SimulatorSettings::default();
+    let system_fonts = clone_system_fonts(&state)?;
+    let mut font_cache = lock_font_cache(&state)?;
+    let render = render_response(&settings, &system_fonts, &mut font_cache);
+
+    Ok(InitialState {
+        settings,
+        system_fonts: system_font_dtos(&system_fonts),
+        render,
+    })
+}
+
+#[tauri::command]
+fn render_preview(
+    settings: SimulatorSettings,
+    state: State<'_, SimulatorState>,
+) -> Result<RenderResponse, String> {
+    let settings = settings.sanitized();
+    let system_fonts = clone_system_fonts(&state)?;
+    let mut font_cache = lock_font_cache(&state)?;
+    Ok(render_response(&settings, &system_fonts, &mut font_cache))
+}
+
+#[tauri::command]
+fn refresh_system_fonts(state: State<'_, SimulatorState>) -> Result<Vec<SystemFontDto>, String> {
+    let fonts = discover_system_fonts();
+    {
+        let mut system_fonts = state
+            .system_fonts
+            .lock()
+            .map_err(|_| "System font list lock is poisoned".to_owned())?;
+        *system_fonts = fonts.clone();
+    }
+    lock_font_cache(&state)?.invalidate();
+    Ok(system_font_dtos(&fonts))
+}
+
+#[tauri::command]
+fn choose_font_file(current: Option<String>) -> Option<String> {
+    let current = current
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(Path::new);
+
+    pick_font_file(current).map(|path| path.to_string_lossy().into_owned())
+}
+
+fn clone_system_fonts(state: &State<'_, SimulatorState>) -> Result<Vec<SystemFont>, String> {
+    state
+        .system_fonts
+        .lock()
+        .map(|fonts| fonts.clone())
+        .map_err(|_| "System font list lock is poisoned".to_owned())
+}
+
+fn lock_font_cache<'a>(
+    state: &'a State<'_, SimulatorState>,
+) -> Result<std::sync::MutexGuard<'a, FontCache>, String> {
+    state
+        .font_cache
+        .lock()
+        .map_err(|_| "Font cache lock is poisoned".to_owned())
+}
+
+fn render_response(
+    settings: &SimulatorSettings,
+    system_fonts: &[SystemFont],
+    font_cache: &mut FontCache,
+) -> RenderResponse {
+    ensure_font(settings, system_fonts, font_cache);
+
+    let frame = render_frame(settings, &font_cache.data);
+    let measurement = measure_text(settings, &font_cache.data);
+    let path = current_font_path(settings, system_fonts);
+    let example_code = example_code(settings, &font_cache.data, path.as_deref());
+
+    RenderResponse {
+        width: frame.width,
+        height: frame.height,
+        rgba: frame.into_rgba(),
+        measurement: Measurement {
+            width: measurement.width,
+            height: measurement.height,
+        },
+        font: FontReport {
+            path: path.map(|path| path.to_string_lossy().into_owned()),
+            error: font_cache.error.clone(),
+            loaded_glyphs: font_cache.data.glyphs.len(),
+            index: font_cache.data.index.clone(),
+            missing_chars: font_cache.missing_chars.clone(),
+            clipped_chars: font_cache.clipped_chars.clone(),
+        },
+        example_code,
+    }
+}
+
+fn render_frame(settings: &SimulatorSettings, font_data: &OwnedFontData) -> FrameBuffer {
+    let mut frame = FrameBuffer::new(settings.canvas_width, settings.canvas_height);
+    let font_data = font_data.as_font_data();
+    let text = drawable_text(settings, &font_data, settings.glyph_color);
+    let _ = text.draw(&mut frame);
+
+    if settings.debug_overlays.has_any() {
+        for kind in settings.debug_overlays.kinds() {
+            let overlay = drawable_text(settings, &font_data, debug_box_color(kind));
+            let _ = overlay.draw_debug_boxes(&mut frame, kind);
+        }
+    }
+
+    frame
+}
+
+fn measure_text(settings: &SimulatorSettings, font_data: &OwnedFontData) -> Size {
+    let font_data = font_data.as_font_data();
+    drawable_text(settings, &font_data, settings.glyph_color).measure()
+}
+
+fn drawable_text<'a>(
+    settings: &'a SimulatorSettings,
+    font_data: &'a GlyphCellFontData<'a>,
+    color: Color,
+) -> DrawableText<'a, Rgb888> {
+    let style = text_style(settings, color).align(settings.alignment.to_glyph_cell_alignment());
+    let text = DrawableText::new(font_data, &settings.text, style)
+        .at(Point::new(settings.origin_x, settings.origin_y));
+
+    match settings.flow {
+        FlowMode::Horizontal => text.horizontal(),
+        FlowMode::Vertical => text.vertical(),
+    }
+}
+
+fn text_style(settings: &SimulatorSettings, color: Color) -> TextStyle<Rgb888> {
+    let style = TextStyle::new(color_to_rgb(color));
+    match settings.layout_mode {
+        LayoutMode::Monospace => {
+            style.monospace_with_spacing(settings.spacing, settings.line_spacing)
+        }
+        LayoutMode::Proportional => {
+            style.proportional_with_line_spacing(settings.spacing, settings.line_spacing)
+        }
+    }
+}
+
+fn ensure_font(
+    settings: &SimulatorSettings,
+    system_fonts: &[SystemFont],
+    font_cache: &mut FontCache,
 ) {
-    let color = preview_grid_color(ui, zoom);
-    let stroke = egui::Stroke::new(1.0, color);
+    let Some(path) = current_font_path(settings, system_fonts) else {
+        font_cache.error = Some("No font path selected".to_owned());
+        font_cache.missing_chars.clear();
+        font_cache.clipped_chars.clear();
+        return;
+    };
 
-    for x in 0..=width {
-        let px = rect.left() + x as f32 * zoom;
-        painter.line_segment(
-            [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-            stroke,
-        );
+    let index = glyph_index_from_text(&settings.text);
+    let key = FontBuildKey {
+        path: path.to_string_lossy().into_owned(),
+        collection_index: settings.collection_index,
+        size: settings.font_size,
+        ascii_width: settings.ascii_width,
+        index,
+        y_offsets: settings.glyph_y_offsets.clone(),
+    };
+
+    if font_cache.key.as_ref() == Some(&key) {
+        return;
     }
-    for y in 0..=height {
-        let py = rect.top() + y as f32 * zoom;
-        painter.line_segment(
-            [egui::pos2(rect.left(), py), egui::pos2(rect.right(), py)],
-            stroke,
-        );
+
+    match build_font_data(
+        &path,
+        settings.collection_index,
+        settings.font_size,
+        settings.ascii_width as u16,
+        &key.index,
+        &settings.glyph_y_offsets,
+    ) {
+        Ok(build) => {
+            font_cache.key = Some(key);
+            font_cache.data = build.data;
+            font_cache.missing_chars = build.missing_chars;
+            font_cache.clipped_chars = build.clipped_chars;
+            font_cache.error = None;
+        }
+        Err(err) => {
+            font_cache.key = Some(key);
+            font_cache.error = Some(err);
+            font_cache.missing_chars.clear();
+            font_cache.clipped_chars.clear();
+        }
     }
 }
 
-fn preview_grid_color(ui: &egui::Ui, zoom: f32) -> egui::Color32 {
-    let base = ui.visuals().widgets.noninteractive.bg_stroke.color;
-    let alpha = (24.0 + zoom * 8.0).round().clamp(28.0, 128.0) as u8;
-    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha)
-}
-
-fn toggle_debug_box(ui: &mut egui::Ui, label: &str, kind: DebugBoxKind, enabled: &mut bool) {
-    let text = egui::RichText::new(label)
-        .color(debug_box_color(kind))
-        .strong();
-    if ui.add(egui::Button::new(text).selected(*enabled)).clicked() {
-        *enabled = !*enabled;
+fn current_font_path(settings: &SimulatorSettings, system_fonts: &[SystemFont]) -> Option<PathBuf> {
+    match settings.font_source {
+        FontSource::System => system_fonts
+            .get(settings.selected_system_font)
+            .map(|font| font.path.clone()),
+        FontSource::Custom => current_custom_font_path(settings),
     }
 }
 
-fn debug_box_color(kind: DebugBoxKind) -> egui::Color32 {
+fn current_custom_font_path(settings: &SimulatorSettings) -> Option<PathBuf> {
+    let trimmed = settings.custom_font_path.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+fn example_code(
+    settings: &SimulatorSettings,
+    font_data: &OwnedFontData,
+    current_font_path: Option<&Path>,
+) -> String {
+    let alignment = settings.alignment.code_name();
+    let text = rust_string_literal(&settings.text);
+    let index = rust_string_literal(&font_data.index);
+    let path = current_font_path
+        .map(|path| rust_string_literal(&path.to_string_lossy()))
+        .unwrap_or_else(|| "\"path/to/font.ttf\"".to_owned());
+    let layout = match settings.layout_mode {
+        LayoutMode::Monospace if settings.spacing == 0 && settings.line_spacing == 0 => {
+            "    .monospace()".to_owned()
+        }
+        LayoutMode::Monospace => format!(
+            "    .monospace_with_spacing({}, {})",
+            settings.spacing, settings.line_spacing
+        ),
+        LayoutMode::Proportional => format!(
+            "    .proportional_with_line_spacing({}, {})",
+            settings.spacing, settings.line_spacing
+        ),
+    };
+    let flow = match settings.flow {
+        FlowMode::Horizontal => String::new(),
+        FlowMode::Vertical => "    .vertical()\n".to_owned(),
+    };
+    let y_offsets = example_y_offsets(settings, &font_data.index);
+
+    format!(
+        "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
+        settings.font_size,
+        settings.ascii_width,
+        path,
+        index,
+        y_offsets,
+        settings.glyph_color.r,
+        settings.glyph_color.g,
+        settings.glyph_color.b,
+        layout,
+        alignment,
+        text,
+        flow,
+        settings.origin_x,
+        settings.origin_y
+    )
+}
+
+fn example_y_offsets(settings: &SimulatorSettings, index: &str) -> String {
+    let Ok(offsets) = parse_y_offset_tweaks(&settings.glyph_y_offsets, index) else {
+        return String::new();
+    };
+
+    if offsets.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("    y_offset: {\n");
+    for (codepoint, delta) in offsets {
+        out.push_str("        ");
+        out.push_str(&rust_char_literal(codepoint));
+        out.push_str(": ");
+        out.push_str(&delta.to_string());
+        out.push_str(",\n");
+    }
+    out.push_str("    },\n");
+    out
+}
+
+fn system_font_dtos(system_fonts: &[SystemFont]) -> Vec<SystemFontDto> {
+    system_fonts
+        .iter()
+        .map(|font| SystemFontDto {
+            name: font.name.clone(),
+            label: font.label().to_owned(),
+            path: font.path.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+fn debug_box_color(kind: DebugBoxKind) -> Color {
     match kind {
-        DebugBoxKind::Cell => egui::Color32::from_rgb(72, 166, 255),
-        DebugBoxKind::Glyph => egui::Color32::from_rgb(233, 96, 154),
+        DebugBoxKind::Cell => Color::rgb(72, 166, 255),
+        DebugBoxKind::Glyph => Color::rgb(233, 96, 154),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+fn finite_f32(value: f32) -> f32 {
+    if value.is_finite() { value } else { 1.0 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 enum FontSource {
     System,
     Custom,
 }
 
-impl FontSource {
-    fn label(self) -> &'static str {
-        match self {
-            Self::System => "System font",
-            Self::Custom => "Custom font file",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 enum LayoutMode {
     Monospace,
     Proportional,
 }
 
-impl LayoutMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Monospace => "Monospace",
-            Self::Proportional => "Proportional",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 enum FlowMode {
     Horizontal,
     Vertical,
 }
 
-impl FlowMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Horizontal => "Horizontal",
-            Self::Vertical => "Vertical",
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DebugOverlays {
     cell: bool,
     glyph: bool,
@@ -822,7 +522,8 @@ impl DebugOverlays {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 enum AlignmentChoice {
     TopLeft,
     TopCenter,
@@ -836,32 +537,6 @@ enum AlignmentChoice {
 }
 
 impl AlignmentChoice {
-    const ALL: [Self; 9] = [
-        Self::TopLeft,
-        Self::TopCenter,
-        Self::TopRight,
-        Self::MiddleLeft,
-        Self::Center,
-        Self::MiddleRight,
-        Self::BottomLeft,
-        Self::BottomCenter,
-        Self::BottomRight,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::TopLeft => "Top left",
-            Self::TopCenter => "Top center",
-            Self::TopRight => "Top right",
-            Self::MiddleLeft => "Middle left",
-            Self::Center => "Center",
-            Self::MiddleRight => "Middle right",
-            Self::BottomLeft => "Bottom left",
-            Self::BottomCenter => "Bottom center",
-            Self::BottomRight => "Bottom right",
-        }
-    }
-
     fn code_name(self) -> &'static str {
         match self {
             Self::TopLeft => "TOP_LEFT",
@@ -988,7 +663,7 @@ struct FontBuild {
 struct FrameBuffer {
     width: u32,
     height: u32,
-    pixels: Vec<Option<egui::Color32>>,
+    pixels: Vec<Option<Color>>,
 }
 
 impl FrameBuffer {
@@ -1000,15 +675,23 @@ impl FrameBuffer {
         }
     }
 
-    fn pixel(&self, x: u32, y: u32) -> Option<egui::Color32> {
-        self.pixels[(y * self.width + x) as usize]
-    }
-
-    fn set_pixel(&mut self, point: Point, color: egui::Color32) {
+    fn set_pixel(&mut self, point: Point, color: Color) {
         let Some(index) = self.pixel_index(point) else {
             return;
         };
         self.pixels[index] = Some(color);
+    }
+
+    fn into_rgba(self) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(self.pixels.len() * 4);
+        for pixel in self.pixels {
+            if let Some(color) = pixel {
+                rgba.extend([color.r, color.g, color.b, 255]);
+            } else {
+                rgba.extend([0, 0, 0, 0]);
+            }
+        }
+        rgba
     }
 
     fn pixel_index(&self, point: Point) -> Option<usize> {
@@ -1041,7 +724,7 @@ impl DrawTarget for FrameBuffer {
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
         for Pixel(point, color) in pixels {
-            self.set_pixel(point, rgb_to_egui(color));
+            self.set_pixel(point, rgb_to_color(color));
         }
 
         Ok(())
@@ -1714,34 +1397,6 @@ fn pick_font_file(_current: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-fn install_ui_font(ctx: &egui::Context, system_fonts: &[SystemFont]) {
-    let Some(font) = system_fonts
-        .iter()
-        .find(|font| font_priority(&font.name) == 0)
-        .or_else(|| system_fonts.first())
-    else {
-        return;
-    };
-
-    let Ok(bytes) = fs::read(&font.path) else {
-        return;
-    };
-
-    let mut definitions = egui::FontDefinitions::default();
-    definitions.font_data.insert(
-        "glyph-cell-ui-cjk".to_owned(),
-        egui::FontData::from_owned(bytes),
-    );
-
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if let Some(fonts) = definitions.families.get_mut(&family) {
-            fonts.insert(0, "glyph-cell-ui-cjk".to_owned());
-        }
-    }
-
-    ctx.set_fonts(definitions);
-}
-
 fn is_font_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -1776,12 +1431,12 @@ fn offset_i16_i32(value: i16, delta: i32) -> i16 {
     clamp_i32_to_i16(value as i32 + delta)
 }
 
-fn egui_to_rgb(color: egui::Color32) -> Rgb888 {
-    Rgb888::new(color.r(), color.g(), color.b())
+fn color_to_rgb(color: Color) -> Rgb888 {
+    Rgb888::new(color.r, color.g, color.b)
 }
 
-fn rgb_to_egui(color: Rgb888) -> egui::Color32 {
-    egui::Color32::from_rgb(color.r(), color.g(), color.b())
+fn rgb_to_color(color: Rgb888) -> Color {
+    Color::rgb(color.r(), color.g(), color.b())
 }
 
 fn rust_string_literal(text: &str) -> String {
@@ -1790,4 +1445,28 @@ fn rust_string_literal(text: &str) -> String {
 
 fn rust_char_literal(ch: char) -> String {
     format!("{ch:?}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_response_uses_fallback_when_no_font_path_is_selected() {
+        let settings = SimulatorSettings {
+            font_source: FontSource::Custom,
+            custom_font_path: String::new(),
+            ..SimulatorSettings::default()
+        };
+        let mut cache = FontCache::default();
+
+        let render = render_response(&settings, &[], &mut cache);
+
+        assert_eq!(
+            render.rgba.len(),
+            (settings.canvas_width * settings.canvas_height * 4) as usize
+        );
+        assert_eq!(render.font.error.as_deref(), Some("No font path selected"));
+        assert_eq!(render.font.index, "A");
+    }
 }

@@ -2,16 +2,14 @@
 
 Desktop simulator for previewing `glyph-cell` layout on a PC.
 
-The UI uses `egui` through `eframe`, which keeps the simulator Rust-native and
-lets it share the same workspace, types, and rendering path as the runtime
-crate.
+The simulator is a Tauri desktop app. The UI is static HTML/CSS/JS, while Rust
+commands keep ownership of font discovery, FreeType rasterization, the real
+`DrawableText` render path, and generated example code.
 
-The simulator loads a CJK-capable system font into `egui` on startup so Chinese
-text in controls and code previews does not render as tofu boxes. Preview glyphs
-are rasterized at runtime with FreeType from either:
+Preview glyphs are rasterized at runtime with FreeType from either:
 
 - a discovered system `.ttf`, `.otf`, or `.ttc` font
-- a user-provided font file path
+- a user-selected font file
 
 For TTC files, use the collection index control to choose a face.
 
@@ -34,3 +32,6 @@ Run it with:
 ```bash
 cargo run -p glyph-cell-simulator
 ```
+
+The Tauri app embeds `ui/index.html`, so no Node package install or frontend
+build step is required.

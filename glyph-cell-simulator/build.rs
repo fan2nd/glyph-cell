@@ -4,6 +4,8 @@ use std::{
 };
 
 fn main() {
+    tauri_build::build();
+
     let target = env::var("TARGET").unwrap_or_default();
     if !target.ends_with("pc-windows-msvc") {
         return;

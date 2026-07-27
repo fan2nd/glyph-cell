@@ -1,3 +1,4 @@
 .ref/
 target/
+glyph-cell-simulator/gen/
 .DS_Store

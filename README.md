@@ -83,8 +83,8 @@ text.
 - `glyph-cell`: runtime types, drawing API, `embedded-graphics` `Text`
   compatibility, debug boxes, and macro re-export.
 - `glyph-cell-macros`: `font_data!` implementation.
-- `glyph-cell-simulator`: `egui`/`eframe` desktop app for tuning layout
-  parameters, previewing rendered pixels, and generating example code.
+- `glyph-cell-simulator`: Tauri desktop app for tuning layout parameters,
+  previewing rendered pixels, and generating example code.
 
 ## Simulator
 
@@ -92,12 +92,14 @@ text.
 cargo run -p glyph-cell-simulator
 ```
 
-The simulator runs the real `DrawableText` renderer against an in-memory draw
-target. It exposes text, layout mode, flow, 3x3 alignment, raster size, ASCII
-cell width, character spacing and line spacing, glyph y-offset tweaks, origin,
-canvas size, colors, zoom, and debug boxes. It can rasterize preview glyphs with
-FreeType from discovered system fonts or a user-provided font file, and warns
-when glyphs are missing or vertically clipped by the generated cell.
+The Tauri simulator runs the real `DrawableText` renderer against an in-memory
+draw target through Rust commands, then displays the returned pixel buffer in a
+static HTML/CSS/JS UI. It exposes text, layout mode, flow, 3x3 alignment, raster
+size, ASCII cell width, character spacing and line spacing, glyph y-offset
+tweaks, origin, canvas size, colors, zoom, and debug boxes. It can rasterize
+preview glyphs with FreeType from discovered system fonts or a user-selected font
+file, and warns when glyphs are missing or vertically clipped by the generated
+cell.
 
 ## Checks
 

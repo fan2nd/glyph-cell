@@ -7,10 +7,14 @@ description = "PC simulator for previewing glyph-cell text layout"
 publish = false
 
 [dependencies]
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
 embedded-graphics-core = "0.4"
 freetype = "0.8"
 glyph-cell = { path = "../glyph-cell", features = ["debug"] }
+serde = { version = "1", features = ["derive"] }
+tauri = "2"
+
+[build-dependencies]
+tauri-build = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Controls_Dialogs"] }

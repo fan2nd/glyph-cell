@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>glyph-cell simulator</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="panel controls-panel">
+        <header class="panel-header">
+          <h1>glyph-cell</h1>
+          <span id="statusText" class="status">Starting</span>
+        </header>
+
+        <section class="control-section">
+          <h2>Font</h2>
+          <label class="field">
+            <span>Source</span>
+            <select id="fontSource">
+              <option value="system">System font</option>
+              <option value="custom">Custom font file</option>
+            </select>
+          </label>
+          <label class="field" id="systemFontField">
+            <span>System font</span>
+            <select id="systemFont"></select>
+          </label>
+          <div class="button-row">
+            <button id="refreshFonts" type="button">Refresh</button>
+            <button id="chooseFont" type="button">Choose file</button>
+          </div>
+          <input id="customPath" class="path-input" type="text" readonly />
+          <div id="fontPath" class="path-label"></div>
+          <div id="fontStatus" class="state-line"></div>
+          <div id="fontWarnings" class="warning-list"></div>
+          <label class="field range-field">
+            <span>Collection index</span>
+            <input id="collectionIndexRange" type="range" min="0" max="8" step="1" />
+            <input id="collectionIndexNumber" type="number" min="0" max="8" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>Raster size</span>
+            <input id="fontSizeRange" type="range" min="4" max="96" step="1" />
+            <input id="fontSizeNumber" type="number" min="4" max="96" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>ASCII cell width</span>
+            <input id="asciiWidthRange" type="range" min="1" max="128" step="1" />
+            <input id="asciiWidthNumber" type="number" min="1" max="128" step="1" />
+          </label>
+          <label class="field">
+            <span>Glyph y_offset tweaks</span>
+            <textarea id="glyphYOffsets" rows="3" placeholder="g: -1&#10;A: 1"></textarea>
+          </label>
+        </section>
+
+        <section class="control-section">
+          <h2>Text</h2>
+          <label class="field">
+            <span>Text</span>
+            <textarea id="text" rows="5"></textarea>
+          </label>
+          <label class="field">
+            <span>Flow</span>
+            <select id="flow">
+              <option value="horizontal">Horizontal</option>
+              <option value="vertical">Vertical</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Alignment</span>
+            <select id="alignment"></select>
+          </label>
+          <label class="field color-field">
+            <span>Glyph color</span>
+            <input id="glyphColor" type="color" />
+          </label>
+        </section>
+
+        <section class="control-section">
+          <h2>Layout</h2>
+          <label class="field">
+            <span>Mode</span>
+            <select id="layoutMode">
+              <option value="monospace">Monospace</option>
+              <option value="proportional">Proportional</option>
+            </select>
+          </label>
+          <label class="field range-field">
+            <span>Spacing</span>
+            <input id="spacingRange" type="range" min="-16" max="48" step="1" />
+            <input id="spacingNumber" type="number" min="-16" max="48" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>Line spacing</span>
+            <input id="lineSpacingRange" type="range" min="-16" max="64" step="1" />
+            <input id="lineSpacingNumber" type="number" min="-16" max="64" step="1" />
+          </label>
+          <div class="check-row">
+            <span>Debug boxes</span>
+            <label><input id="debugCell" type="checkbox" /> Cell</label>
+            <label><input id="debugGlyph" type="checkbox" /> Glyph</label>
+          </div>
+        </section>
+
+        <section class="control-section">
+          <h2>Canvas</h2>
+          <label class="field range-field">
+            <span>Origin X</span>
+            <input id="originXRange" type="range" min="-80" max="240" step="1" />
+            <input id="originXNumber" type="number" min="-80" max="240" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>Origin Y</span>
+            <input id="originYRange" type="range" min="-80" max="180" step="1" />
+            <input id="originYNumber" type="number" min="-80" max="180" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>Canvas width</span>
+            <input id="canvasWidthRange" type="range" min="32" max="360" step="1" />
+            <input id="canvasWidthNumber" type="number" min="32" max="360" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>Canvas height</span>
+            <input id="canvasHeightRange" type="range" min="24" max="240" step="1" />
+            <input id="canvasHeightNumber" type="number" min="24" max="240" step="1" />
+          </label>
+          <label class="field range-field">
+            <span>Zoom</span>
+            <input id="zoomRange" type="range" min="1" max="16" step="0.25" />
+            <input id="zoomNumber" type="number" min="1" max="16" step="0.25" />
+          </label>
+        </section>
+      </aside>
+
+      <section class="preview-panel">
+        <header class="workspace-header">
+          <h2>Preview</h2>
+          <div id="measurement" class="measurement"></div>
+        </header>
+        <div class="preview-scroll">
+          <div id="canvasStage" class="canvas-stage">
+            <canvas id="previewCanvas"></canvas>
+            <div id="gridOverlay" class="grid-overlay"></div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel code-panel">
+        <header class="panel-header">
+          <h2>Example Code</h2>
+          <div class="icon-row">
+            <button id="copyCode" type="button" title="Copy code">Copy</button>
+            <button id="toggleCode" type="button" title="Hide example code">&gt;</button>
+          </div>
+        </header>
+        <textarea id="exampleCode" class="code-output" spellcheck="false" readonly></textarea>
+      </aside>
+    </main>
+  </body>
+</html>
