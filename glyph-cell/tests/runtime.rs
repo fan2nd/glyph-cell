@@ -1,4 +1,13 @@
-use embedded_graphics::{mock_display::MockDisplay, pixelcolor::BinaryColor, prelude::*};
+use embedded_graphics::{
+    mock_display::MockDisplay,
+    pixelcolor::BinaryColor,
+    prelude::*,
+    primitives::Rectangle,
+    text::{
+        Baseline, Text,
+        renderer::{CharacterStyle, TextRenderer},
+    },
+};
 use glyph_cell::*;
 
 const FONT: FontData<'static> = FontData {
@@ -220,6 +229,86 @@ fn draws_proportional_horizontal_text_using_actual_widths() {
     text.draw(&mut display).unwrap();
 
     display.assert_pattern(&[" #  ## ", "# # # #", "### ## ", "# # # #", "# # ## "]);
+}
+
+#[test]
+fn embedded_graphics_text_draws_with_generated_font_style() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let style = GlyphCellTextStyle::new(&FONT, BinaryColor::On).monospace();
+
+    Text::with_baseline("AB", Point::zero(), style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+
+    display.assert_pattern(&["  #  ## ", " # # # #", " ### ## ", " # # # #", " # # ## "]);
+}
+
+#[test]
+fn embedded_graphics_text_measures_proportional_layout_and_returns_next_position() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let style = GlyphCellTextStyle::new(&FONT, BinaryColor::On).proportional(1);
+    let text = Text::with_baseline("AB", Point::zero(), style, Baseline::Top);
+
+    assert_eq!(
+        text.bounding_box(),
+        Rectangle::new(Point::zero(), Size::new(7, 5))
+    );
+
+    let next = text.draw(&mut display).unwrap();
+
+    assert_eq!(next, Point::new(7, 0));
+    display.assert_pattern(&[" #  ## ", "# # # #", "### ## ", "# # # #", "# # ## "]);
+}
+
+#[test]
+fn embedded_graphics_text_applies_bottom_baseline_to_generated_cell() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let style = GlyphCellTextStyle::new(&FONT, BinaryColor::On).monospace();
+
+    let next = Text::with_baseline("A", Point::new(0, 4), style, Baseline::Bottom)
+        .draw(&mut display)
+        .unwrap();
+
+    assert_eq!(next, Point::new(4, 4));
+    display.assert_pattern(&["  # ", " # #", " ###", " # #", " # #"]);
+}
+
+#[test]
+fn embedded_graphics_text_renderer_metrics_are_independent_of_text_color() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let mut style = GlyphCellTextStyle::new(&FONT, BinaryColor::On).monospace();
+    CharacterStyle::set_text_color(&mut style, None);
+
+    let metrics = style.measure_string("AB", Point::zero(), Baseline::Top);
+    let next = Text::with_baseline("AB", Point::zero(), style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+
+    assert_eq!(
+        metrics.bounding_box,
+        Rectangle::new(Point::zero(), Size::new(8, 5))
+    );
+    assert_eq!(metrics.next_position, Point::new(8, 0));
+    assert_eq!(next, Point::new(8, 0));
+    display.assert_eq(&MockDisplay::new());
+}
+
+#[test]
+fn embedded_graphics_text_renderer_draw_string_treats_newline_as_missing_glyph() {
+    let mut display = MockDisplay::<BinaryColor>::new();
+    let style = GlyphCellTextStyle::new(&FONT, BinaryColor::On).monospace();
+
+    let metrics = style.measure_string("A\nB", Point::zero(), Baseline::Top);
+    let next = style
+        .draw_string("A\nB", Point::zero(), Baseline::Top, &mut display)
+        .unwrap();
+
+    assert_eq!(
+        metrics.bounding_box,
+        Rectangle::new(Point::zero(), Size::new(12, 5))
+    );
+    assert_eq!(metrics.next_position, Point::new(12, 0));
+    assert_eq!(next, Point::new(12, 0));
 }
 
 #[test]

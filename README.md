@@ -2,7 +2,9 @@
 
 `glyph-cell` is a small Rust workspace for drawing generated bitmap
 fonts on [`embedded-graphics`](https://docs.rs/embedded-graphics) draw targets.
-The runtime crate depends only on `embedded-graphics-core`.
+The runtime crate is `no_std` and implements both its own `DrawableText` path
+and the `embedded-graphics` `TextRenderer` path used by
+`embedded_graphics::text::Text`.
 
 It is split into two root-level crates:
 
@@ -69,10 +71,17 @@ lines or columns within that area.
 `DrawableText::draw()` emits binary pixels for normal `embedded-graphics` draw
 targets and reads the generated bitmap as 1bpp.
 
+`GlyphCellTextStyle` wraps a `&FontData` and foreground color for
+`embedded_graphics::text::Text`. It implements `TextRenderer` and
+`CharacterStyle`, so generated fonts can be used with normal `Text::new`,
+`Text::with_baseline`, and `Text::with_text_style` calls. This compatibility
+path is horizontal; keep using `DrawableText::vertical()` for upright vertical
+text.
+
 ## Crates
 
-- `glyph-cell`: runtime types, drawing API, debug boxes, and macro
-  re-export.
+- `glyph-cell`: runtime types, drawing API, `embedded-graphics` `Text`
+  compatibility, debug boxes, and macro re-export.
 - `glyph-cell-macros`: `font_data!` implementation.
 - `glyph-cell-simulator`: `egui`/`eframe` desktop app for tuning layout
   parameters, previewing rendered pixels, and generating example code.

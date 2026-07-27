@@ -54,7 +54,7 @@ impl<'a, C: PixelColor> DrawableText<'a, C> {
         Rectangle::new(self.run().top_left(), self.measure())
     }
 
-    pub(crate) fn run(&self) -> TextRun<'a> {
+    pub(crate) fn run(&self) -> TextRun<'a, 'a> {
         TextRun::new(
             self.font_data,
             self.text,
@@ -81,10 +81,10 @@ where
     }
 }
 
-fn draw_text_run<D, C>(
+pub(crate) fn draw_text_run<D, C>(
     target: &mut D,
     font: &FontData<'_>,
-    run: TextRun<'_>,
+    run: TextRun<'_, '_>,
     color: C,
 ) -> Result<(), D::Error>
 where
@@ -99,7 +99,7 @@ where
     })
 }
 
-fn draw_glyph<D, C>(
+pub(crate) fn draw_glyph<D, C>(
     target: &mut D,
     font: &FontData<'_>,
     glyph: &Glyph,

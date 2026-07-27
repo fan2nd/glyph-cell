@@ -18,19 +18,19 @@ pub(crate) struct PositionedGlyph {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TextRun<'a> {
-    font: &'a FontData<'a>,
-    text: &'a str,
+pub(crate) struct TextRun<'font, 'text> {
+    font: &'font FontData<'font>,
+    text: &'text str,
     start: Point,
     layout: TextLayout,
     alignment: Alignment,
     flow: TextFlow,
 }
 
-impl<'a> TextRun<'a> {
+impl<'font, 'text> TextRun<'font, 'text> {
     pub(crate) const fn new(
-        font: &'a FontData<'a>,
-        text: &'a str,
+        font: &'font FontData<'font>,
+        text: &'text str,
         start: Point,
         layout: TextLayout,
         alignment: Alignment,

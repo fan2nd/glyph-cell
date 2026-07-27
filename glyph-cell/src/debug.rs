@@ -41,7 +41,7 @@ impl<'a, C: PixelColor> DrawableText<'a, C> {
 
 fn draw_text_boxes<D, C>(
     target: &mut D,
-    run: TextRun<'_>,
+    run: TextRun<'_, '_>,
     color: C,
     kind: DebugBoxKind,
 ) -> Result<(), D::Error>
