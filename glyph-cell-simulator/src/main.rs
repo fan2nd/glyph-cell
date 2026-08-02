@@ -22,6 +22,8 @@ use glyph_cell::{
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+const PREVIEW_PADDING: u32 = 4;
+
 fn main() {
     tauri::Builder::default()
         .manage(SimulatorState::new())
@@ -74,10 +76,6 @@ struct SimulatorSettings {
     spacing: i32,
     line_spacing: i32,
     glyph_y_offsets: String,
-    origin_x: i32,
-    origin_y: i32,
-    canvas_width: u32,
-    canvas_height: u32,
     zoom: f32,
     glyph_color: Color,
 }
@@ -99,10 +97,6 @@ impl Default for SimulatorSettings {
             spacing: 1,
             line_spacing: 0,
             glyph_y_offsets: String::new(),
-            origin_x: 4,
-            origin_y: 22,
-            canvas_width: 180,
-            canvas_height: 96,
             zoom: 4.0,
             glyph_color: Color::rgb(54, 187, 128),
         }
@@ -113,13 +107,10 @@ impl SimulatorSettings {
     fn sanitized(mut self) -> Self {
         self.collection_index = self.collection_index.min(8);
         self.font_size = self.font_size.clamp(4, 96);
-        self.ascii_width = self.ascii_width.clamp(1, 128);
+        let (min_ascii_width, max_ascii_width) = ascii_width_bounds(self.font_size);
+        self.ascii_width = self.ascii_width.clamp(min_ascii_width, max_ascii_width);
         self.spacing = self.spacing.clamp(-16, 48);
         self.line_spacing = self.line_spacing.clamp(-16, 64);
-        self.origin_x = self.origin_x.clamp(-80, 240);
-        self.origin_y = self.origin_y.clamp(-80, 180);
-        self.canvas_width = self.canvas_width.clamp(32, 360);
-        self.canvas_height = self.canvas_height.clamp(24, 240);
         self.zoom = finite_f32(self.zoom).clamp(1.0, 16.0);
         self
     }
@@ -250,10 +241,14 @@ fn render_response(
 ) -> RenderResponse {
     ensure_font(settings, system_fonts, font_cache);
 
-    let frame = render_frame(settings, &font_cache.data);
-    let measurement = measure_text(settings, &font_cache.data);
+    let render_data = font_cache
+        .data
+        .with_ascii_width(effective_ascii_width(settings) as u16);
+    let measurement = measure_text(settings, &render_data);
+    let origin = preview_origin(settings, &render_data);
+    let frame = render_frame(settings, &render_data, measurement, origin);
     let path = current_font_path(settings, system_fonts);
-    let example_code = example_code(settings, &font_cache.data, path.as_deref());
+    let example_code = example_code(settings, &render_data, path.as_deref(), origin);
 
     RenderResponse {
         width: frame.width,
@@ -275,15 +270,21 @@ fn render_response(
     }
 }
 
-fn render_frame(settings: &SimulatorSettings, font_data: &OwnedFontData) -> FrameBuffer {
-    let mut frame = FrameBuffer::new(settings.canvas_width, settings.canvas_height);
+fn render_frame(
+    settings: &SimulatorSettings,
+    font_data: &OwnedFontData,
+    measurement: Size,
+    origin: Point,
+) -> FrameBuffer {
+    let canvas = canvas_size_for(measurement);
+    let mut frame = FrameBuffer::new(canvas.width, canvas.height);
     let font_data = font_data.as_font_data();
-    let text = drawable_text(settings, &font_data, settings.glyph_color);
+    let text = drawable_text_at(settings, &font_data, settings.glyph_color, origin);
     let _ = text.draw(&mut frame);
 
     if settings.debug_overlays.has_any() {
         for kind in settings.debug_overlays.kinds() {
-            let overlay = drawable_text(settings, &font_data, debug_box_color(kind));
+            let overlay = drawable_text_at(settings, &font_data, debug_box_color(kind), origin);
             let _ = overlay.draw_debug_boxes(&mut frame, kind);
         }
     }
@@ -293,17 +294,31 @@ fn render_frame(settings: &SimulatorSettings, font_data: &OwnedFontData) -> Fram
 
 fn measure_text(settings: &SimulatorSettings, font_data: &OwnedFontData) -> Size {
     let font_data = font_data.as_font_data();
-    drawable_text(settings, &font_data, settings.glyph_color).measure()
+    drawable_text_at(settings, &font_data, settings.glyph_color, Point::zero()).measure()
 }
 
-fn drawable_text<'a>(
+fn preview_origin(settings: &SimulatorSettings, font_data: &OwnedFontData) -> Point {
+    let font_data = font_data.as_font_data();
+    let bounds =
+        drawable_text_at(settings, &font_data, settings.glyph_color, Point::zero()).bounding_box();
+    Point::new(PREVIEW_PADDING as i32, PREVIEW_PADDING as i32) - bounds.top_left
+}
+
+fn canvas_size_for(measurement: Size) -> Size {
+    Size::new(
+        measurement.width.saturating_add(PREVIEW_PADDING * 2),
+        measurement.height.saturating_add(PREVIEW_PADDING * 2),
+    )
+}
+
+fn drawable_text_at<'a>(
     settings: &'a SimulatorSettings,
     font_data: &'a GlyphCellFontData<'a>,
     color: Color,
+    origin: Point,
 ) -> DrawableText<'a, Rgb888> {
     let style = text_style(settings, color).align(settings.alignment.to_glyph_cell_alignment());
-    let text = DrawableText::new(font_data, &settings.text, style)
-        .at(Point::new(settings.origin_x, settings.origin_y));
+    let text = DrawableText::new(font_data, &settings.text, style).at(origin);
 
     match settings.flow {
         FlowMode::Horizontal => text.horizontal(),
@@ -340,7 +355,6 @@ fn ensure_font(
         path: path.to_string_lossy().into_owned(),
         collection_index: settings.collection_index,
         size: settings.font_size,
-        ascii_width: settings.ascii_width,
         index,
         y_offsets: settings.glyph_y_offsets.clone(),
     };
@@ -353,7 +367,6 @@ fn ensure_font(
         &path,
         settings.collection_index,
         settings.font_size,
-        settings.ascii_width as u16,
         &key.index,
         &settings.glyph_y_offsets,
     ) {
@@ -391,6 +404,7 @@ fn example_code(
     settings: &SimulatorSettings,
     font_data: &OwnedFontData,
     current_font_path: Option<&Path>,
+    origin: Point,
 ) -> String {
     let alignment = settings.alignment.code_name();
     let text = rust_string_literal(&settings.text);
@@ -411,6 +425,7 @@ fn example_code(
             settings.spacing, settings.line_spacing
         ),
     };
+    let ascii_width = example_ascii_width(settings);
     let flow = match settings.flow {
         FlowMode::Horizontal => String::new(),
         FlowMode::Vertical => "    .vertical()\n".to_owned(),
@@ -418,9 +433,9 @@ fn example_code(
     let y_offsets = example_y_offsets(settings, &font_data.index);
 
     format!(
-        "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n    ascii_width: {},\n    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
+        "use embedded_graphics_core::geometry::Point;\nuse embedded_graphics_core::pixelcolor::Rgb888;\nuse glyph_cell::{{font_data, Alignment, DrawableText, FontData, TextStyle}};\n\nconst FONT: FontData<'static> = font_data! {{\n    size: {},\n{}    path: {},\n    index: {},\n{}}};\n\nlet style = TextStyle::new(Rgb888::new({}, {}, {}))\n{}\n    .align(Alignment::{});\n\nDrawableText::new(&FONT, {}, style)\n{}    .at(Point::new({}, {}))\n    .draw(&mut display)?;\n",
         settings.font_size,
-        settings.ascii_width,
+        ascii_width,
         path,
         index,
         y_offsets,
@@ -431,8 +446,8 @@ fn example_code(
         alignment,
         text,
         flow,
-        settings.origin_x,
-        settings.origin_y
+        origin.x,
+        origin.y
     )
 }
 
@@ -477,6 +492,26 @@ fn debug_box_color(kind: DebugBoxKind) -> Color {
 
 fn finite_f32(value: f32) -> f32 {
     if value.is_finite() { value } else { 1.0 }
+}
+
+fn ascii_width_bounds(font_size: u16) -> (u32, u32) {
+    let max = font_size as u32;
+    let min = max.div_ceil(2);
+    (min, max)
+}
+
+fn effective_ascii_width(settings: &SimulatorSettings) -> u32 {
+    match settings.layout_mode {
+        LayoutMode::Monospace => settings.ascii_width,
+        LayoutMode::Proportional => settings.font_size as u32,
+    }
+}
+
+fn example_ascii_width(settings: &SimulatorSettings) -> String {
+    match settings.layout_mode {
+        LayoutMode::Monospace => format!("    ascii_width: {},\n", settings.ascii_width),
+        LayoutMode::Proportional => String::new(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,7 +618,6 @@ struct FontBuildKey {
     path: String,
     collection_index: u32,
     size: u16,
-    ascii_width: u32,
     index: String,
     y_offsets: String,
 }
@@ -650,6 +684,19 @@ impl OwnedFontData {
                 y_min: 0,
                 advance_width: 6,
             }],
+        }
+    }
+
+    fn with_ascii_width(&self, ascii_width: u16) -> Self {
+        let mut glyphs = self.glyphs.clone();
+        apply_cell_offsets(self.size, ascii_width, &self.index, &mut glyphs);
+
+        Self {
+            index: self.index.clone(),
+            size: self.size,
+            ascii_width,
+            bitmap: self.bitmap.clone(),
+            glyphs,
         }
     }
 }
@@ -735,7 +782,6 @@ fn build_font_data(
     path: &Path,
     collection_index: u32,
     size: u16,
-    ascii_width: u16,
     index: &str,
     y_offset_tweaks: &str,
 ) -> Result<FontBuild, String> {
@@ -762,7 +808,7 @@ fn build_font_data(
     }
     apply_auto_y_offsets(size, index, &mut glyphs);
     apply_y_offset_tweaks(&mut glyphs, index, y_offset_tweaks)?;
-    apply_cell_offsets(size, ascii_width, index, &mut glyphs);
+    apply_cell_offsets(size, size, index, &mut glyphs);
 
     let mut bitmap = Vec::new();
     for ((ch, glyph), pixels) in index.chars().zip(glyphs.iter_mut()).zip(bitmaps.iter_mut()) {
@@ -777,7 +823,7 @@ fn build_font_data(
         data: OwnedFontData {
             index: index.to_owned(),
             size,
-            ascii_width,
+            ascii_width: size,
             bitmap,
             glyphs,
         },
@@ -1464,9 +1510,97 @@ mod tests {
 
         assert_eq!(
             render.rgba.len(),
-            (settings.canvas_width * settings.canvas_height * 4) as usize
+            (render.width * render.height * 4) as usize
+        );
+        assert_eq!(render.width, render.measurement.width + PREVIEW_PADDING * 2);
+        assert_eq!(
+            render.height,
+            render.measurement.height + PREVIEW_PADDING * 2
         );
         assert_eq!(render.font.error.as_deref(), Some("No font path selected"));
         assert_eq!(render.font.index, "A");
+    }
+
+    #[test]
+    fn settings_clamp_ascii_width_to_raster_size_bounds() {
+        let too_small = SimulatorSettings {
+            font_size: 17,
+            ascii_width: 2,
+            ..SimulatorSettings::default()
+        }
+        .sanitized();
+        let too_large = SimulatorSettings {
+            font_size: 17,
+            ascii_width: 30,
+            ..SimulatorSettings::default()
+        }
+        .sanitized();
+
+        assert_eq!(too_small.ascii_width, 9);
+        assert_eq!(too_large.ascii_width, 17);
+    }
+
+    #[test]
+    fn proportional_layout_ignores_configured_ascii_width() {
+        let settings = SimulatorSettings {
+            layout_mode: LayoutMode::Proportional,
+            font_size: 18,
+            ascii_width: 9,
+            ..SimulatorSettings::default()
+        }
+        .sanitized();
+
+        assert_eq!(settings.ascii_width, 9);
+        assert_eq!(effective_ascii_width(&settings), 18);
+    }
+
+    #[test]
+    fn ascii_width_changes_layout_metadata_without_changing_bitmap() {
+        let base = OwnedFontData::fallback();
+        let adjusted = base.with_ascii_width(4);
+
+        assert_eq!(base.bitmap, adjusted.bitmap);
+        assert_eq!(base.glyphs[0].width, adjusted.glyphs[0].width);
+        assert_eq!(adjusted.glyphs[0].cell_width, 4);
+    }
+
+    #[test]
+    fn proportional_example_omits_ascii_width() {
+        let settings = SimulatorSettings {
+            layout_mode: LayoutMode::Proportional,
+            ..SimulatorSettings::default()
+        };
+        let code = example_code(
+            &settings,
+            &OwnedFontData::fallback(),
+            None,
+            Point::new(4, 4),
+        );
+
+        assert!(!code.contains("ascii_width"));
+    }
+
+    #[test]
+    fn preview_origin_places_aligned_text_inside_auto_canvas() {
+        let font_data = OwnedFontData::fallback();
+        let settings = SimulatorSettings {
+            text: "A".to_owned(),
+            alignment: AlignmentChoice::BottomRight,
+            ..SimulatorSettings::default()
+        };
+        let measurement = measure_text(&settings, &font_data);
+        let origin = preview_origin(&settings, &font_data);
+        let font = font_data.as_font_data();
+        let bounds =
+            drawable_text_at(&settings, &font, settings.glyph_color, origin).bounding_box();
+
+        assert_eq!(bounds.top_left, Point::new(4, 4));
+        assert_eq!(
+            canvas_size_for(measurement),
+            Size::new(
+                measurement.width + PREVIEW_PADDING * 2,
+                measurement.height + PREVIEW_PADDING * 2,
+            )
+        );
     }
 }

@@ -95,11 +95,11 @@ cargo run -p glyph-cell-simulator
 The Tauri simulator runs the real `DrawableText` renderer against an in-memory
 draw target through Rust commands, then displays the returned pixel buffer in a
 static HTML/CSS/JS UI. It exposes text, layout mode, flow, 3x3 alignment, raster
-size, ASCII cell width, character spacing and line spacing, glyph y-offset
-tweaks, origin, canvas size, colors, zoom, and debug boxes. It can rasterize
-preview glyphs with FreeType from discovered system fonts or a user-selected font
-file, and warns when glyphs are missing or vertically clipped by the generated
-cell.
+size, monospace ASCII cell width, character spacing and line spacing, glyph
+y-offset tweaks, colors, zoom, and debug boxes. The preview canvas automatically
+sizes to the measured text bounds with a small padding. It can rasterize preview
+glyphs with FreeType from discovered system fonts or a user-selected font file,
+and warns when glyphs are missing or vertically clipped by the generated cell.
 
 ## Checks
 

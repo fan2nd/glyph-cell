@@ -13,11 +13,12 @@ Preview glyphs are rasterized at runtime with FreeType from either:
 
 For TTC files, use the collection index control to choose a face.
 
-In monospace layout, generated `FontData` supplies each cell width and bitmap
-offset. `ASCII cell width` is a font generation parameter; non-ASCII characters
-use the raster height as their cell width. Proportional layout uses each glyph's
-actual bitmap width while keeping the raster height for its display cell. Both
-layout modes expose character spacing and line spacing controls.
+In monospace layout, `ASCII cell width` is a layout parameter; non-ASCII
+characters use the raster height as their cell width. The simulator keeps this
+out of the rasterization cache and applies it to the preview render data.
+Proportional layout uses each glyph's actual bitmap width while keeping the
+raster height for its display cell. Both layout modes expose character spacing
+and line spacing controls.
 
 The simulator renders the same generated 1bpp bitmap path as the runtime. It
 also warns when glyphs are missing from the selected font or vertically clipped

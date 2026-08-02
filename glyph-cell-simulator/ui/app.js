@@ -25,10 +25,6 @@ const numericFields = [
   "asciiWidth",
   "spacing",
   "lineSpacing",
-  "originX",
-  "originY",
-  "canvasWidth",
-  "canvasHeight",
   "zoom",
 ];
 
@@ -100,6 +96,9 @@ function bindControls() {
   for (const id of ["layoutMode", "flow", "alignment"]) {
     $(id).addEventListener("change", (event) => {
       state.settings[id] = event.target.value;
+      if (id === "layoutMode") {
+        syncLayoutControls();
+      }
       scheduleRender();
     });
   }
@@ -133,8 +132,14 @@ function bindNumberPair(field) {
   const update = (raw) => {
     const value = parseClamped(raw, number);
     state.settings[field] = value;
-    range.value = String(value);
-    number.value = String(value);
+
+    if (field === "fontSize") {
+      syncAsciiWidthBounds();
+      state.settings.asciiWidth = parseClamped(state.settings.asciiWidth, $("asciiWidthNumber"));
+      syncNumberPair("asciiWidth");
+    }
+
+    syncNumberPair(field);
     scheduleRender();
   };
 
@@ -172,14 +177,44 @@ function syncControls() {
   $("glyphColor").value = colorToHex(state.settings.glyphColor);
   $("debugCell").checked = state.settings.debugOverlays.cell;
   $("debugGlyph").checked = state.settings.debugOverlays.glyph;
+  syncAsciiWidthBounds();
+  state.settings.asciiWidth = parseClamped(state.settings.asciiWidth, $("asciiWidthNumber"));
+  syncLayoutControls();
 
   for (const field of numericFields) {
-    const value = state.settings[field];
-    $(`${field}Range`).value = String(value);
-    $(`${field}Number`).value = String(value);
+    syncNumberPair(field);
   }
 
   syncFontVisibility();
+}
+
+function syncNumberPair(field) {
+  const value = state.settings[field];
+  $(`${field}Range`).value = String(value);
+  $(`${field}Number`).value = String(value);
+}
+
+function syncAsciiWidthBounds() {
+  const { min, max } = asciiWidthBounds();
+  for (const input of [$("asciiWidthRange"), $("asciiWidthNumber")]) {
+    input.min = String(min);
+    input.max = String(max);
+  }
+}
+
+function asciiWidthBounds() {
+  const fontSize = Number(state.settings?.fontSize || 4);
+  return {
+    min: Math.ceil(fontSize / 2),
+    max: fontSize,
+  };
+}
+
+function syncLayoutControls() {
+  const asciiWidthActive = state.settings.layoutMode === "monospace";
+  $("asciiWidthField").hidden = !asciiWidthActive;
+  $("asciiWidthRange").disabled = !asciiWidthActive;
+  $("asciiWidthNumber").disabled = !asciiWidthActive;
 }
 
 function syncFontVisibility() {

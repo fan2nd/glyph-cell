@@ -46,11 +46,6 @@
             <input id="fontSizeRange" type="range" min="4" max="96" step="1" />
             <input id="fontSizeNumber" type="number" min="4" max="96" step="1" />
           </label>
-          <label class="field range-field">
-            <span>ASCII cell width</span>
-            <input id="asciiWidthRange" type="range" min="1" max="128" step="1" />
-            <input id="asciiWidthNumber" type="number" min="1" max="128" step="1" />
-          </label>
           <label class="field">
             <span>Glyph y_offset tweaks</span>
             <textarea id="glyphYOffsets" rows="3" placeholder="g: -1&#10;A: 1"></textarea>
@@ -89,6 +84,11 @@
               <option value="proportional">Proportional</option>
             </select>
           </label>
+          <label class="field range-field" id="asciiWidthField">
+            <span>ASCII cell width</span>
+            <input id="asciiWidthRange" type="range" min="9" max="18" step="1" />
+            <input id="asciiWidthNumber" type="number" min="9" max="18" step="1" />
+          </label>
           <label class="field range-field">
             <span>Spacing</span>
             <input id="spacingRange" type="range" min="-16" max="48" step="1" />
@@ -108,26 +108,6 @@
 
         <section class="control-section">
           <h2>Canvas</h2>
-          <label class="field range-field">
-            <span>Origin X</span>
-            <input id="originXRange" type="range" min="-80" max="240" step="1" />
-            <input id="originXNumber" type="number" min="-80" max="240" step="1" />
-          </label>
-          <label class="field range-field">
-            <span>Origin Y</span>
-            <input id="originYRange" type="range" min="-80" max="180" step="1" />
-            <input id="originYNumber" type="number" min="-80" max="180" step="1" />
-          </label>
-          <label class="field range-field">
-            <span>Canvas width</span>
-            <input id="canvasWidthRange" type="range" min="32" max="360" step="1" />
-            <input id="canvasWidthNumber" type="number" min="32" max="360" step="1" />
-          </label>
-          <label class="field range-field">
-            <span>Canvas height</span>
-            <input id="canvasHeightRange" type="range" min="24" max="240" step="1" />
-            <input id="canvasHeightNumber" type="number" min="24" max="240" step="1" />
-          </label>
           <label class="field range-field">
             <span>Zoom</span>
             <input id="zoomRange" type="range" min="1" max="16" step="0.25" />
